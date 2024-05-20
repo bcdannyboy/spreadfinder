@@ -1,0 +1,7 @@
+argparse
+datetime
+yfinance
+numpy
+pandas
+scipy
+tqdm
