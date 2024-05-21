@@ -7,8 +7,13 @@ from scipy.stats import norm
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from itertools import islice
 import os
+import logging
 
 TRADIER_API_URL = "https://api.tradier.com/v1"
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 def get_stock_price(symbol, api_token):
     url = f"{TRADIER_API_URL}/markets/quotes"
@@ -66,7 +71,7 @@ def get_historical_volatility(symbol, api_token, days=252):
     return volatility
 
 def get_stock_data(symbol, mindte, maxdte, api_token):
-    print(f"Fetching stock data for {symbol} with min DTE {mindte} and max DTE {maxdte}")
+    logger.info(f"Fetching stock data for {symbol} with min DTE {mindte} and max DTE {maxdte}")
     expirations = get_option_expirations(symbol, api_token)
 
     valid_exp = []
@@ -87,7 +92,7 @@ def get_stock_data(symbol, mindte, maxdte, api_token):
             puts.append((exp, pd.DataFrame(opt_puts_filtered)))
             calls.append((exp, pd.DataFrame(opt_calls_filtered)))
 
-    print(f"Found {len(puts)} put chains and {len(calls)} call chains for {symbol} with min DTE {mindte} and max DTE {maxdte}")
+    logger.info(f"Found {len(puts)} put chains and {len(calls)} call chains for {symbol} with min DTE {mindte} and max DTE {maxdte}")
     return puts, calls
 
 def monte_carlo_simulation(current_price, days, simulations, volatility):
@@ -196,9 +201,8 @@ def process_bull_put_spread(exp, put_chain, underlying_price, min_ror, max_strik
             results.extend(future.result())
             completed_spreads += 1
             if completed_spreads % 100 == 0 or completed_spreads == total_spreads:
-                print(f"\rProcessed {completed_spreads}/{total_spreads} bull put spreads", end='', flush=True)
+                logger.info(f"Processed {completed_spreads}/{total_spreads} bull put spreads")
 
-    print()
     return results
 
 def batch_futures(iterator, batch_size):
@@ -210,7 +214,7 @@ def batch_futures(iterator, batch_size):
         yield batch
 
 def find_bull_put_spreads(puts, underlying_price, min_ror, max_strike_dist, batch_size, simulations, volatility, risk_free_rate):
-    print(f"Finding bull put spreads for underlying price {underlying_price} using batch size {batch_size}")
+    logger.info(f"Finding bull put spreads for underlying price {underlying_price} using batch size {batch_size}")
     bull_put_spreads = []
 
     with ProcessPoolExecutor(max_workers=os.cpu_count()) as executor:
@@ -223,9 +227,8 @@ def find_bull_put_spreads(puts, underlying_price, min_ror, max_strike_dist, batc
             for future in as_completed(batch):
                 bull_put_spreads.extend(future.result())
             batches_processed += 1
-            print(f"\rProcessed batch {batches_processed}", end='', flush=True)
+            logger.info(f"Processed batch {batches_processed}")
 
-    print()
     return bull_put_spreads
 
 def process_iron_condor(exp, put_chain, call_chain, underlying_price, min_ror, max_strike_dist, simulations, volatility, risk_free_rate):
@@ -306,13 +309,12 @@ def process_iron_condor(exp, put_chain, call_chain, underlying_price, min_ror, m
             results.extend(future.result())
             completed_condors += 1
             if completed_condors % 100 == 0 or completed_condors == total_condors:
-                print(f"\rProcessed {completed_condors}/{total_condors} iron condors", end='', flush=True)
+                logger.info(f"Processed {completed_condors}/{total_condors} iron condors")
 
-    print()
     return results
 
 def find_iron_condors(puts, calls, underlying_price, min_ror, max_strike_dist, batch_size, simulations, volatility, risk_free_rate):
-    print(f"Finding iron condors for underlying price {underlying_price} using batch size {batch_size}")
+    logger.info(f"Finding iron condors for underlying price {underlying_price} using batch size {batch_size}")
     iron_condors = []
 
     with ProcessPoolExecutor(max_workers=os.cpu_count()) as executor:
@@ -326,9 +328,8 @@ def find_iron_condors(puts, calls, underlying_price, min_ror, max_strike_dist, b
             for future in as_completed(batch):
                 iron_condors.extend(future.result())
             batches_processed += 1
-            print(f"\rProcessed batch {batches_processed}", end='', flush=True)
+            logger.info(f"Processed batch {batches_processed}")
 
-    print()
     return iron_condors
 
 def find_best_spreads(puts, calls, underlying_price, top_n, min_ror, max_strike_dist, batch_size, simulations, volatility, include_iron_condors, risk_free_rate):
@@ -379,21 +380,21 @@ if __name__ == '__main__':
     volatility = get_historical_volatility(args.symbol, args.api_token)
     puts, calls = get_stock_data(args.symbol, args.mindte, args.maxdte, args.api_token)
     
-    print(f"Underlying price: {underlying_price}")
-    print(f"Historical volatility: {volatility}")
+    logger.info(f"Underlying price: {underlying_price}")
+    logger.info(f"Historical volatility: {volatility}")
 
     best_spreads = find_best_spreads(puts, calls, underlying_price, args.top_n, args.min_ror, args.max_strike_dist, args.batch_size, args.simulations, volatility, args.include_iron_condors, args.risk_free_rate)
     
-    print("Best Spreads:")
+    logger.info("Best Spreads:")
     df = pd.DataFrame(best_spreads, columns=['Type', 'Expiration', 'Short Put Strike', 'Long Put Strike', 'Short Call Strike', 'Long Call Strike', 'Credit', 'Max Loss', 'Return on Risk', 'Probability of Success', 'MC Probability of Profit', 'Pricing State (Put)', 'Pricing State (Call)'])
     df.to_csv(args.output, index=False)
-    print(f"Results saved to {args.output}")
+    logger.info(f"Results saved to {args.output}")
 
     for spread in best_spreads:
         if spread[0] == 'bull_put':
-            print(f"Bull Put Spread:\n\tExpiration: {spread[1]}\n\tShort Strike: {spread[2]}\n\tLong Strike: {spread[3]}\n\tCredit: {spread[6]}\n\tMax Loss: {spread[7]}\n\tReturn on Risk: {spread[8]*100:.2f}%\n\tProbability of Success: {spread[9]*100:.2f}%\n\tMC Probability of Profit: {spread[10]*100:.2f}%\n\tPricing State: {spread[11]}")
+            logger.info(f"Bull Put Spread:\n\tExpiration: {spread[1]}\n\tShort Strike: {spread[2]}\n\tLong Strike: {spread[3]}\n\tCredit: {spread[6]}\n\tMax Loss: {spread[7]}\n\tReturn on Risk: {spread[8]*100:.2f}%\n\tProbability of Success: {spread[9]*100:.2f}%\n\tMC Probability of Profit: {spread[10]*100:.2f}%\n\tPricing State: {spread[11]}")
         elif spread[0] == 'iron_condor':
-            print(f"Iron Condor:\n\tExpiration: {spread[1]}\n\tShort Put Strike: {spread[2]}\n\tLong Put Strike: {spread[3]}\n\tShort Call Strike: {spread[4]}\n\tLong Call Strike: {spread[5]}\n\tCredit: {spread[6]}\n\tMax Loss: {spread[7]}\n\tReturn on Risk: {spread[8]*100:.2f}%\n\tProbability of Success: {spread[9]*100:.2f}%\n\tMC Probability of Profit: {spread[10]*100:.2f}%\n\tPricing State (Put): {spread[11]}\n\tPricing State (Call): {spread[12]}")
+            logger.info(f"Iron Condor:\n\tExpiration: {spread[1]}\n\tShort Put Strike: {spread[2]}\n\tLong Put Strike: {spread[3]}\n\tShort Call Strike: {spread[4]}\n\tLong Call Strike: {spread[5]}\n\tCredit: {spread[6]}\n\tMax Loss: {spread[7]}\n\tReturn on Risk: {spread[8]*100:.2f}%\n\tProbability of Success: {spread[9]*100:.2f}%\n\tMC Probability of Profit: {spread[10]*100:.2f}%\n\tPricing State (Put): {spread[11]}\n\tPricing State (Call): {spread[12]}")
 
     endTime = datetime.datetime.now()
-    print(f"Time taken: {endTime - startTime}")
+    logger.info(f"Time taken: {endTime - startTime}")
