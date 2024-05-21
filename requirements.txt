@@ -4,4 +4,3 @@ requests
 numpy
 pandas
 scipy
-yfinance
