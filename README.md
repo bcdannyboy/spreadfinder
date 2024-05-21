@@ -10,6 +10,7 @@ spreadfinder is a Python tool that identifies and ranks optimal options spreads 
     - Iron Condor
 - Performs Monte Carlo Simulations to estimate probabilities of profit.
 - Calculates Black-Scholes option pricing.
+- Calculates Binomial pricing for American options.
 - Ranks spreads based on probability of success, return on risk, and Monte Carlo simulation results.
 - Outputs the top spreads to a CSV file.
 
@@ -75,3 +76,4 @@ This command fetches option chains for AAPL with expirations between 30 and 60 d
 ### Additional Notes
 
 - Ensure you have a valid Tradier API token to fetch real-time options data.
+- When selling options, you typically want to identify spreads that are fairly priced or overpriced to maximize your return on risk.
