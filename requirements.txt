@@ -4,4 +4,3 @@ yfinance
 numpy
 pandas
 scipy
-tqdm
