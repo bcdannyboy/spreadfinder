@@ -1,6 +1,7 @@
 argparse
 datetime
-yfinance
+requests
 numpy
 pandas
 scipy
+yfinance
