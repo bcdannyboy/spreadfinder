@@ -9,7 +9,7 @@ spreadfinder is a Python tool that identifies and ranks optimal options spreads 
     - Bull Put
     - Iron Condor
 - Performs Monte Carlo Simulations to estimate probabilities of profit.
-- Dynamically calculates historical volatility using `yfinance`.
+- Calculates Black-Scholes option pricing.
 - Ranks spreads based on probability of success, return on risk, and Monte Carlo simulation results.
 - Outputs the top spreads to a CSV file.
 
@@ -23,7 +23,6 @@ spreadfinder is a Python tool that identifies and ranks optimal options spreads 
 - `numpy`
 - `pandas`
 - `scipy`
-- `yfinance`
 
 ## Installation
 
