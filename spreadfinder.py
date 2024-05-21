@@ -3,11 +3,14 @@ import datetime
 import numpy as np
 import pandas as pd
 import requests
-from scipy.stats import norm
+from scipy.stats import norm, t
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from itertools import islice
 import os
 import logging
+from scipy.stats.qmc import Sobol
+from arch import arch_model  # For GARCH
+import math
 
 TRADIER_API_URL = "https://api.tradier.com/v1"
 
@@ -67,8 +70,35 @@ def get_historical_volatility(symbol, api_token, days=252):
     historical_prices = [day['close'] for day in data['history']['day']]
     
     log_returns = np.log(np.array(historical_prices[1:]) / np.array(historical_prices[:-1]))
-    volatility = np.std(log_returns) * np.sqrt(days)  # annualized volatility
-    return volatility
+    
+    # Using GARCH(1,1) model for volatility estimation
+    # Rescale log_returns for better GARCH model performance
+    log_returns *= 10  # Rescaling
+    model = arch_model(log_returns, vol='Garch', p=1, q=1, rescale=False)
+    res = model.fit(disp="off")
+    forecast = res.forecast(horizon=1)
+    annualized_volatility = np.sqrt(forecast.variance.values[-1, :][0]) * np.sqrt(days)
+    
+    return annualized_volatility
+
+def heston_simulation(S0, T, r, kappa, theta, sigma, rho, v0, steps, simulations):
+    dt = T / steps
+    prices = np.zeros((steps + 1, simulations))
+    volatilities = np.zeros((steps + 1, simulations))
+    
+    prices[0] = S0
+    volatilities[0] = v0
+
+    for t in range(1, steps + 1):
+        z1 = np.random.normal(size=simulations)
+        z2 = rho * z1 + np.sqrt(1 - rho**2) * np.random.normal(size=simulations)
+        
+        volatilities[t] = (volatilities[t-1] + kappa * (theta - np.maximum(volatilities[t-1], 0)) * dt 
+                           + sigma * np.sqrt(np.maximum(volatilities[t-1], 0)) * np.sqrt(dt) * z1)
+        
+        prices[t] = prices[t-1] * np.exp((r - 0.5 * volatilities[t-1]) * dt + np.sqrt(np.maximum(volatilities[t-1], 0)) * np.sqrt(dt) * z2)
+    
+    return prices
 
 def get_stock_data(symbol, mindte, maxdte, api_token):
     logger.info(f"Fetching stock data for {symbol} with min DTE {mindte} and max DTE {maxdte}")
@@ -95,16 +125,22 @@ def get_stock_data(symbol, mindte, maxdte, api_token):
     logger.info(f"Found {len(puts)} put chains and {len(calls)} call chains for {symbol} with min DTE {mindte} and max DTE {maxdte}")
     return puts, calls
 
-def monte_carlo_simulation(current_price, days, simulations, volatility):
+def monte_carlo_simulation(current_price, days, simulations, volatility, use_t_dist=False, df=3):
+    # Ensure the number of simulations is a power of two
+    simulations = 2**int(np.ceil(np.log2(simulations)))
+
     dt = 1 / 252  # daily time step
-    prices = np.zeros((days + 1, simulations))
-    prices[0] = current_price
 
-    for t in range(1, days + 1):
-        z = np.random.standard_normal(simulations)
-        prices[t] = prices[t - 1] * np.exp((0 - 0.5 * volatility ** 2) * dt + volatility * np.sqrt(dt) * z)
-
-    return prices
+    if use_t_dist:
+        z = t.rvs(df, size=(simulations, days))
+    else:
+        z = np.random.normal(size=(simulations, days))
+    
+    log_returns = (volatility * np.sqrt(dt)) * z
+    price_paths = current_price * np.exp(np.cumsum(log_returns, axis=1))
+    price_paths = np.hstack([np.full((simulations, 1), current_price), price_paths])
+    
+    return price_paths.T
 
 def black_scholes_price(option_type, S, K, T, r, sigma):
     d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
@@ -184,7 +220,7 @@ def process_bull_put_spread(exp, put_chain, underlying_price, min_ror, max_strik
             probability_of_success = norm.cdf(d1)
 
             # Monte Carlo Simulation
-            mc_prices = monte_carlo_simulation(underlying_price, int(time_to_expiration * 252), simulations, iv)
+            mc_prices = monte_carlo_simulation(underlying_price, int(time_to_expiration * 252), simulations, iv, use_t_dist=True)
             mc_prob_profit = np.mean(mc_prices[-1] > short_put['strike'])
 
             return [(exp, short_put['strike'], long_put['strike'], credit, max_loss, return_on_risk, probability_of_success, mc_prob_profit, pricing_state)]
@@ -286,7 +322,7 @@ def process_iron_condor(exp, put_chain, call_chain, underlying_price, min_ror, m
             probability_of_success = (probability_of_success_put + probability_of_success_call) / 2
 
             # Monte Carlo Simulation
-            mc_prices = monte_carlo_simulation(underlying_price, int(time_to_expiration * 252), simulations, iv_put)
+            mc_prices = monte_carlo_simulation(underlying_price, int(time_to_expiration * 252), simulations, iv_put, use_t_dist=True)
             mc_prob_profit_put = np.mean(mc_prices[-1] > short_put['strike'])
             mc_prob_profit_call = np.mean(mc_prices[-1] < short_call['strike'])
             mc_prob_profit = (mc_prob_profit_put + mc_prob_profit_call) / 2
@@ -373,6 +409,7 @@ if __name__ == '__main__':
     argparser.add_argument('-api_token', type=str, required=True, help='Tradier API token')
     argparser.add_argument('-simulations', type=int, default=1000, help='Number of Monte Carlo simulations')
     argparser.add_argument('-risk_free_rate', '-rf', type=float, default=0.01, help='Risk-free interest rate')
+    argparser.add_argument('--use_heston', action='store_true', help='Use Heston model for simulations')
 
     args = argparser.parse_args()
     
