@@ -3,7 +3,6 @@ import datetime
 import numpy as np
 import pandas as pd
 import requests
-import yfinance as yf
 from scipy.stats import norm
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from itertools import islice
@@ -50,6 +49,22 @@ def get_option_chain(symbol, expiration, api_token):
     calls = [opt for opt in options if opt['option_type'] == 'call']
     return puts, calls
 
+def get_historical_volatility(symbol, api_token, days=252):
+    url = f"{TRADIER_API_URL}/markets/history"
+    headers = {
+        'Authorization': f'Bearer {api_token}',
+        'Accept': 'application/json'
+    }
+    params = {'symbol': symbol, 'interval': 'daily', 'start': (datetime.datetime.now() - datetime.timedelta(days=365)).strftime('%Y-%m-%d'), 'end': datetime.datetime.now().strftime('%Y-%m-%d')}
+    response = requests.get(url, headers=headers, params=params)
+    response.raise_for_status()
+    data = response.json()
+    historical_prices = [day['close'] for day in data['history']['day']]
+    
+    log_returns = np.log(np.array(historical_prices[1:]) / np.array(historical_prices[:-1]))
+    volatility = np.std(log_returns) * np.sqrt(days)  # annualized volatility
+    return volatility
+
 def get_stock_data(symbol, mindte, maxdte, api_token):
     print(f"Fetching stock data for {symbol} with min DTE {mindte} and max DTE {maxdte}")
     expirations = get_option_expirations(symbol, api_token)
@@ -75,12 +90,6 @@ def get_stock_data(symbol, mindte, maxdte, api_token):
     print(f"Found {len(puts)} put chains and {len(calls)} call chains for {symbol} with min DTE {mindte} and max DTE {maxdte}")
     return puts, calls
 
-def get_historical_volatility(symbol, days=252):
-    stock_data = yf.download(symbol, period=f"{days}d")
-    stock_data['Log Returns'] = np.log(stock_data['Close'] / stock_data['Close'].shift(1))
-    volatility = stock_data['Log Returns'].std() * np.sqrt(252)  # annualized volatility
-    return volatility
-
 def monte_carlo_simulation(current_price, days, simulations, volatility):
     dt = 1 / 252  # daily time step
     prices = np.zeros((days + 1, simulations))
@@ -92,7 +101,18 @@ def monte_carlo_simulation(current_price, days, simulations, volatility):
 
     return prices
 
+def black_scholes_price(option_type, S, K, T, r, sigma):
+    d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
+    d2 = d1 - sigma * np.sqrt(T)
+    if option_type == 'call':
+        price = S * norm.cdf(d1) - K * np.exp(-r * T) * norm.cdf(d2)
+    elif option_type == 'put':
+        price = K * np.exp(-r * T) * norm.cdf(-d2) - S * norm.cdf(-d1)
+    return price
+
 def process_bull_put_spread(exp, put_chain, underlying_price, min_ror, max_strike_dist, simulations, volatility):
+    risk_free_rate = 0.01  # Assuming a risk-free rate of 1%
+
     def process_single_spread(i, j):
         short_put = put_chain.iloc[j]
         long_put = put_chain.iloc[i]
@@ -116,6 +136,12 @@ def process_bull_put_spread(exp, put_chain, underlying_price, min_ror, max_strik
             if iv is None or iv <= 0:
                 return []
 
+            theoretical_price = black_scholes_price('put', underlying_price, short_put['strike'], time_to_expiration, risk_free_rate, iv)
+            if theoretical_price > short_put['bid']:
+                underpriced = True
+            else:
+                underpriced = False
+
             d1 = (np.log(underlying_price / short_put['strike']) + (0.5 * iv**2) * time_to_expiration) / (iv * np.sqrt(time_to_expiration))
             probability_of_success = norm.cdf(d1)
 
@@ -123,7 +149,7 @@ def process_bull_put_spread(exp, put_chain, underlying_price, min_ror, max_strik
             mc_prices = monte_carlo_simulation(underlying_price, int(time_to_expiration * 252), simulations, iv)
             mc_prob_profit = np.mean(mc_prices[-1] > short_put['strike'])
 
-            return [(exp, short_put['strike'], long_put['strike'], credit, max_loss, return_on_risk, probability_of_success, mc_prob_profit)]
+            return [(exp, short_put['strike'], long_put['strike'], credit, max_loss, return_on_risk, probability_of_success, mc_prob_profit, underpriced)]
         return []
 
     results = []
@@ -170,6 +196,8 @@ def find_bull_put_spreads(puts, underlying_price, min_ror, max_strike_dist, batc
     return bull_put_spreads
 
 def process_iron_condor(exp, put_chain, call_chain, underlying_price, min_ror, max_strike_dist, simulations, volatility):
+    risk_free_rate = 0.01  # Assuming a risk-free rate of 1%
+
     def process_single_condor(i, j, k, l):
         short_put = put_chain.iloc[j]
         long_put = put_chain.iloc[i]
@@ -187,9 +215,9 @@ def process_iron_condor(exp, put_chain, call_chain, underlying_price, min_ror, m
             max_loss = max(max_loss_put, max_loss_call)
             if max_loss <= 0:
                 return []
-            
+
             return_on_risk = credit / max_loss
-            
+
             if return_on_risk < min_ror:
                 return []
 
@@ -198,7 +226,20 @@ def process_iron_condor(exp, put_chain, call_chain, underlying_price, min_ror, m
             iv_call = short_call['greeks']['mid_iv']
             if iv_put is None or iv_put <= 0 or iv_call is None or iv_call <= 0:
                 return []
-            
+
+            theoretical_price_put = black_scholes_price('put', underlying_price, short_put['strike'], time_to_expiration, risk_free_rate, iv_put)
+            theoretical_price_call = black_scholes_price('call', underlying_price, short_call['strike'], time_to_expiration, risk_free_rate, iv_call)
+
+            if theoretical_price_put > short_put['bid']:
+                underpriced_put = True
+            else:
+                underpriced_put = False
+
+            if theoretical_price_call > short_call['bid']:
+                underpriced_call = True
+            else:
+                underpriced_call = False
+
             d1_put = (np.log(underlying_price / short_put['strike']) + (0.5 * iv_put**2) * time_to_expiration) / (iv_put * np.sqrt(time_to_expiration))
             d1_call = (np.log(underlying_price / short_call['strike']) + (0.5 * iv_call**2) * time_to_expiration) / (iv_call * np.sqrt(time_to_expiration))
             probability_of_success_put = norm.cdf(d1_put)
@@ -210,14 +251,14 @@ def process_iron_condor(exp, put_chain, call_chain, underlying_price, min_ror, m
             mc_prob_profit_put = np.mean(mc_prices[-1] > short_put['strike'])
             mc_prob_profit_call = np.mean(mc_prices[-1] < short_call['strike'])
             mc_prob_profit = (mc_prob_profit_put + mc_prob_profit_call) / 2
-            
-            return [(exp, short_put['strike'], long_put['strike'], short_call['strike'], long_call['strike'], credit, max_loss, return_on_risk, probability_of_success, mc_prob_profit)]
+
+            return [(exp, short_put['strike'], long_put['strike'], short_call['strike'], long_call['strike'], credit, max_loss, return_on_risk, probability_of_success, mc_prob_profit, underpriced_put, underpriced_call)]
         return []
 
     results = []
     put_chain = put_chain.sort_values(by='strike')
     call_chain = call_chain.sort_values(by='strike')
-    
+
     with ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:
         futures = [executor.submit(process_single_condor, i, j, k, l)
                    for i in range(len(put_chain)) for j in range(i + 1, len(put_chain))
@@ -268,9 +309,19 @@ def find_best_spreads(puts, calls, underlying_price, top_n, min_ror, max_strike_
 
     combined_spreads.sort(key=lambda x: (x[-3], x[-2]), reverse=True)
 
-    return combined_spreads[:top_n]
+    spread_data = []
+    for spread in combined_spreads:
+        if spread[-1] == 'bull_put':
+            exp, short_strike, long_strike, credit, max_loss, return_on_risk, probability_of_success, mc_prob_profit, underpriced, spread_type = spread
+            spread_data.append([spread_type, exp, short_strike, long_strike, None, None, credit, max_loss, return_on_risk, probability_of_success, mc_prob_profit, underpriced, None])
+        elif spread[-1] == 'iron_condor':
+            exp, short_put_strike, long_put_strike, short_call_strike, long_call_strike, credit, max_loss, return_on_risk, probability_of_success, mc_prob_profit, underpriced_put, underpriced_call, spread_type = spread
+            spread_data.append([spread_type, exp, short_put_strike, long_put_strike, short_call_strike, long_call_strike, credit, max_loss, return_on_risk, probability_of_success, mc_prob_profit, underpriced_put, underpriced_call])
+
+    return spread_data[:top_n]
 
 if __name__ == '__main__':
+    startTime = datetime.datetime.now()
     argparser = argparse.ArgumentParser(description="Find and rank option spreads")
     
     argparser.add_argument('-symbol', '-s', type=str, required=True, help='Stock symbol to fetch data for')
@@ -288,7 +339,7 @@ if __name__ == '__main__':
     args = argparser.parse_args()
     
     underlying_price = get_stock_price(args.symbol, args.api_token)
-    volatility = get_historical_volatility(args.symbol)
+    volatility = get_historical_volatility(args.symbol, args.api_token)
     puts, calls = get_stock_data(args.symbol, args.mindte, args.maxdte, args.api_token)
     
     print(f"Underlying price: {underlying_price}")
@@ -297,38 +348,15 @@ if __name__ == '__main__':
     best_spreads = find_best_spreads(puts, calls, underlying_price, args.top_n, args.min_ror, args.max_strike_dist, args.batch_size, args.simulations, volatility, args.include_iron_condors)
     
     print("Best Spreads:")
-    spread_data = []
-    for spread in best_spreads:
-        exp = spread[0]
-        if spread[-1] == 'bull_put':
-            short_strike = spread[1]
-            long_strike = spread[2]
-            credit = spread[3]
-            max_loss = spread[4]
-            return_on_risk = spread[5]
-            probability_of_success = spread[6]
-            mc_prob_profit = spread[7]
-            spread_type = spread[8]
-            spread_data.append([spread_type, exp, short_strike, long_strike, None, None, credit, max_loss, return_on_risk, probability_of_success, mc_prob_profit])
-        elif spread[-1] == 'iron_condor':
-            short_put_strike = spread[1]
-            long_put_strike = spread[2]
-            short_call_strike = spread[3]
-            long_call_strike = spread[4]
-            credit = spread[5]
-            max_loss = spread[6]
-            return_on_risk = spread[7]
-            probability_of_success = spread[8]
-            mc_prob_profit = spread[9]
-            spread_type = spread[10]
-            spread_data.append([spread_type, exp, short_put_strike, long_put_strike, short_call_strike, long_call_strike, credit, max_loss, return_on_risk, probability_of_success, mc_prob_profit])
-
-    df = pd.DataFrame(spread_data, columns=['Type', 'Expiration', 'Short Put Strike', 'Long Put Strike', 'Short Call Strike', 'Long Call Strike', 'Credit', 'Max Loss', 'Return on Risk', 'Probability of Success', 'MC Probability of Profit'])
+    df = pd.DataFrame(best_spreads, columns=['Type', 'Expiration', 'Short Put Strike', 'Long Put Strike', 'Short Call Strike', 'Long Call Strike', 'Credit', 'Max Loss', 'Return on Risk', 'Probability of Success', 'MC Probability of Profit', 'Underpriced Put', 'Underpriced Call'])
     df.to_csv(args.output, index=False)
     print(f"Results saved to {args.output}")
 
     for spread in best_spreads:
-        if spread[-1] == 'bull_put':
-            print(f"Bull Put Spread:\n\tExpiration: {spread[0]}\n\tShort Strike: {spread[1]}\n\tLong Strike: {spread[2]}\n\tCredit: {spread[3]}\n\tMax Loss: {spread[4]}\n\tReturn on Risk: {spread[5]*100:.2f}%\n\tProbability of Success: {spread[6]*100:.2f}%\n\tMC Probability of Profit: {spread[7]*100:.2f}%")
-        elif spread[-1] == 'iron_condor':
-            print(f"Iron Condor:\n\tExpiration: {spread[0]}\n\tShort Put Strike: {spread[1]}\n\tLong Put Strike: {spread[2]}\n\tShort Call Strike: {spread[3]}\n\tLong Call Strike: {spread[4]}\n\tCredit: {spread[5]}\n\tMax Loss: {spread[6]}\n\tReturn on Risk: {spread[7]*100:.2f}%\n\tProbability of Success: {spread[8]*100:.2f}%\n\tMC Probability of Profit: {spread[9]*100:.2f}%")
+        if spread[0] == 'bull_put':
+            print(f"Bull Put Spread:\n\tExpiration: {spread[1]}\n\tShort Strike: {spread[2]}\n\tLong Strike: {spread[3]}\n\tCredit: {spread[6]}\n\tMax Loss: {spread[7]}\n\tReturn on Risk: {spread[8]*100:.2f}%\n\tProbability of Success: {spread[9]*100:.2f}%\n\tMC Probability of Profit: {spread[10]*100:.2f}%\n\tUnderpriced: {spread[11]}")
+        elif spread[0] == 'iron_condor':
+            print(f"Iron Condor:\n\tExpiration: {spread[1]}\n\tShort Put Strike: {spread[2]}\n\tLong Put Strike: {spread[3]}\n\tShort Call Strike: {spread[4]}\n\tLong Call Strike: {spread[5]}\n\tCredit: {spread[6]}\n\tMax Loss: {spread[7]}\n\tReturn on Risk: {spread[8]*100:.2f}%\n\tProbability of Success: {spread[9]*100:.2f}%\n\tMC Probability of Profit: {spread[10]*100:.2f}%\n\tUnderpriced Put: {spread[11]}\n\tUnderpriced Call: {spread[12]}")
+
+    endTime = datetime.datetime.now()
+    print(f"Time taken: {endTime - startTime}")
