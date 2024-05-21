@@ -64,6 +64,7 @@ python spreadfinder.py -symbol SYMBOL -mindte MINDTE -maxdte MAXDTE [-top_n TOP_
 - `-api_token`: Tradier API token (required).
 - `--include_iron_condors`: Include iron condor spreads (default: False).
 - `-simulations`, `-sim`: Number of Monte Carlo simulations to run (default: 1000).
+- `-risk_free_rate`, `-rf`: Risk-free rate for option pricing (default: 0.01).
 
 ### Example
 
