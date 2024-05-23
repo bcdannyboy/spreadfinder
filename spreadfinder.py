@@ -71,9 +71,10 @@ def get_historical_volatility(symbol, api_token, days=252):
     
     log_returns = np.log(np.array(historical_prices[1:]) / np.array(historical_prices[:-1]))
     
+    # Rescaling log returns by a factor of 100
+    log_returns *= 100
+    
     # Using GARCH(1,1) model for volatility estimation
-    # Rescale log_returns for better GARCH model performance
-    log_returns *= 10  # Rescaling
     model = arch_model(log_returns, vol='Garch', p=1, q=1, rescale=False)
     res = model.fit(disp="off")
     forecast = res.forecast(horizon=1)
