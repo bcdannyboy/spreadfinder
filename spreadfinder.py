@@ -172,36 +172,38 @@ def american_option_binomial(S, K, T, r, sigma, option_type='call', steps=100):
     
     return option_values[0, 0]
 
-def get_stock_data(symbol, mindte, maxdte, api_token):
-    logger.info(f"Fetching stock data for {symbol} with min DTE {mindte} and max DTE {maxdte}")
-    expirations = get_option_expirations(symbol, api_token)
+def get_stock_data(symbols, mindte, maxdte, api_token):
+    all_puts = []
+    all_calls = []
+    
+    for symbol in symbols:
+        logger.info(f"Fetching stock data for {symbol} with min DTE {mindte} and max DTE {maxdte}")
+        expirations = get_option_expirations(symbol, api_token)
 
-    valid_exp = []
-    for exp in expirations:
-        try:
-            exp_date = datetime.datetime.strptime(exp, '%Y-%m-%d')
-            dte = (exp_date - datetime.datetime.now()).days
-            if mindte <= dte <= maxdte:
-                valid_exp.append(exp)
-        except ValueError as e:
-            logger.error(f"Error parsing expiration date: {exp}, error: {e}")
+        valid_exp = []
+        for exp in expirations:
+            try:
+                exp_date = datetime.datetime.strptime(exp, '%Y-%m-%d')
+                dte = (exp_date - datetime.datetime.now()).days
+                if mindte <= dte <= maxdte:
+                    valid_exp.append(exp)
+            except ValueError as e:
+                logger.error(f"Error parsing expiration date: {exp}, error: {e}")
 
-    puts = []
-    calls = []
+        with ProcessPoolExecutor(max_workers=8) as executor:
+            futures = {executor.submit(get_option_chain, symbol, exp, api_token): exp for exp in valid_exp}
+            for future in as_completed(futures):
+                exp = futures[future]
+                opt_puts_filtered, opt_calls_filtered = future.result()
+                if opt_puts_filtered or opt_calls_filtered:
+                    all_puts.append((symbol, exp, pd.DataFrame(opt_puts_filtered)))
+                    all_calls.append((symbol, exp, pd.DataFrame(opt_calls_filtered)))
+                else:
+                    logger.warning(f"No options data found for expiration {exp}")
 
-    with ProcessPoolExecutor(max_workers=8) as executor:
-        futures = {executor.submit(get_option_chain, symbol, exp, api_token): exp for exp in valid_exp}
-        for future in as_completed(futures):
-            exp = futures[future]
-            opt_puts_filtered, opt_calls_filtered = future.result()
-            if opt_puts_filtered or opt_calls_filtered:
-                puts.append((exp, pd.DataFrame(opt_puts_filtered)))
-                calls.append((exp, pd.DataFrame(opt_calls_filtered)))
-            else:
-                logger.warning(f"No options data found for expiration {exp}")
-
-    logger.info(f"Found {len(puts)} put chains and {len(calls)} call chains for {symbol} with min DTE {mindte} and max DTE {maxdte}")
-    return puts, calls
+        logger.info(f"Found {len(all_puts)} put chains and {len(all_calls)} call chains for {symbol} with min DTE {mindte} and max DTE {maxdte}")
+    
+    return all_puts, all_calls
 
 def process_single_spread(i, j, put_chain, underlying_price, min_ror, max_strike_dist, simulations, volatility, risk_free_rate, api_token, symbol, exp, cache):
     short_put = put_chain.iloc[j]
@@ -249,7 +251,7 @@ def process_single_spread(i, j, put_chain, underlying_price, min_ror, max_strike
         return [(exp, short_put['strike'], long_put['strike'], credit, max_loss, return_on_risk, probability_of_success, mc_prob_profit_no_dte, mc_prob_profit_with_dte, pricing_state)]
     return []
 
-def process_bull_put_spread(exp, put_chain, underlying_price, min_ror, max_strike_dist, simulations, volatility, risk_free_rate, api_token, symbol, cache):
+def process_bull_put_spread(symbol, exp, put_chain, underlying_price, min_ror, max_strike_dist, simulations, volatility, risk_free_rate, api_token, cache):
     results = []
     put_chain = put_chain.sort_values(by='strike')
     with ProcessPoolExecutor(max_workers=os.cpu_count()) as executor:
@@ -327,7 +329,7 @@ def process_single_condor(i, j, k, l, put_chain, call_chain, underlying_price, m
         return [(exp, short_put['strike'], long_put['strike'], short_call['strike'], long_call['strike'], credit, max_loss, return_on_risk, probability_of_success, mc_prob_profit, pricing_state_put, pricing_state_call)]
     return []
 
-def process_iron_condor(exp, put_chain, call_chain, underlying_price, min_ror, max_strike_dist, simulations, volatility, risk_free_rate):
+def process_iron_condor(symbol, exp, put_chain, call_chain, underlying_price, min_ror, max_strike_dist, simulations, volatility, risk_free_rate):
     results = []
     put_chain = put_chain.sort_values(by='strike')
     call_chain = call_chain.sort_values(by='strike')
@@ -355,14 +357,14 @@ def batch_futures(iterator, batch_size):
             break
         yield batch
 
-def find_bull_put_spreads(puts, underlying_price, min_ror, max_strike_dist, batch_size, simulations, volatility, risk_free_rate, api_token, symbol, cache):
+def find_bull_put_spreads(puts, underlying_price, min_ror, max_strike_dist, batch_size, simulations, volatility, risk_free_rate, api_token, cache):
     logger.info(f"Finding bull put spreads for underlying price {underlying_price} using batch size {batch_size}")
     bull_put_spreads = []
 
     with ProcessPoolExecutor(max_workers=os.cpu_count()) as executor:
         futures_iterator = (
-            executor.submit(process_bull_put_spread, exp, put_chain, underlying_price, min_ror, max_strike_dist, simulations, volatility, risk_free_rate, api_token, symbol, cache)
-            for exp, put_chain in puts
+            executor.submit(process_bull_put_spread, symbol, exp, put_chain, underlying_price, min_ror, max_strike_dist, simulations, volatility, risk_free_rate, api_token, cache)
+            for symbol, exp, put_chain in puts
         )
         batches_processed = 0
         for batch in batch_futures(futures_iterator, batch_size):
@@ -379,9 +381,9 @@ def find_iron_condors(puts, calls, underlying_price, min_ror, max_strike_dist, b
 
     with ProcessPoolExecutor(max_workers=os.cpu_count()) as executor:
         futures_iterator = (
-            executor.submit(process_iron_condor, exp, put_chain, call_chain, underlying_price, min_ror, max_strike_dist, simulations, volatility, risk_free_rate)
-            for (exp, put_chain), (exp_c, call_chain) in zip(puts, calls)
-            if exp == exp_c
+            executor.submit(process_iron_condor, symbol, exp, put_chain, call_chain, underlying_price, min_ror, max_strike_dist, simulations, volatility, risk_free_rate)
+            for (symbol, exp, put_chain), (symbol_c, exp_c, call_chain) in zip(puts, calls)
+            if symbol == symbol_c and exp == exp_c
         )
         batches_processed = 0
         for batch in batch_futures(futures_iterator, batch_size):
@@ -392,39 +394,46 @@ def find_iron_condors(puts, calls, underlying_price, min_ror, max_strike_dist, b
 
     return iron_condors
 
-def find_best_spreads(puts, calls, underlying_price, top_n, min_ror, max_strike_dist, batch_size, simulations, volatility, include_iron_condors, risk_free_rate, api_token, symbol):
+def find_best_spreads(symbols, puts, calls, top_n, min_ror, max_strike_dist, batch_size, simulations, risk_free_rate, api_token, find_ic):
+    combined_spreads = []
+
     with Manager() as manager:
         cache = manager.dict()
+        
+        for symbol in symbols:
+            underlying_price = get_stock_price(symbol, api_token)
+            volatility = get_historical_volatility(symbol, api_token, cache)
+            
+            symbol_puts = [put for put in puts if put[0] == symbol]
+            symbol_calls = [call for call in calls if call[0] == symbol]
 
-        bull_put_spreads = find_bull_put_spreads(puts, underlying_price, min_ror, max_strike_dist, batch_size, simulations, volatility, risk_free_rate, api_token, symbol, cache)
-        combined_spreads = []
+            bull_put_spreads = find_bull_put_spreads(symbol_puts, underlying_price, min_ror, max_strike_dist, batch_size, simulations, volatility, risk_free_rate, api_token, cache)
+            for spread in bull_put_spreads:
+                combined_spreads.append(list((*spread, 'bull_put', symbol)))  # Convert tuple to list and add symbol
 
-        for spread in bull_put_spreads:
-            combined_spreads.append(list((*spread, 'bull_put')))  # Convert tuple to list
+            if find_ic:
+                iron_condors = find_iron_condors(symbol_puts, symbol_calls, underlying_price, min_ror, max_strike_dist, batch_size, simulations, volatility, risk_free_rate)
+                for spread in iron_condors:
+                    combined_spreads.append(list((*spread, 'iron_condor', symbol)))  # Convert tuple to list and add symbol
 
-        if include_iron_condors:
-            iron_condors = find_iron_condors(puts, calls, underlying_price, min_ror, max_strike_dist, batch_size, simulations, volatility, risk_free_rate, cache)
-            for spread in iron_condors:
-                combined_spreads.append(list((*spread, 'iron_condor')))  # Convert tuple to list
+    # Filter out spreads that don't meet the minimum return on risk
+    filtered_spreads = [spread for spread in combined_spreads if spread[5] >= min_ror]
 
-        # Filter out spreads that don't meet the minimum return on risk
-        filtered_spreads = [spread for spread in combined_spreads if spread[5] >= min_ror]
+    # Sort by probability of success, prioritizing the highest probabilities
+    filtered_spreads.sort(key=lambda x: x[6], reverse=True)
 
-        # Sort by probability of success, prioritizing the highest probabilities
-        filtered_spreads.sort(key=lambda x: x[6], reverse=True)
+    spread_data = []
+    for spread in filtered_spreads[:top_n]:
+        if spread[-2] == 'bull_put':
+            exp, short_strike, long_strike, credit, max_loss, return_on_risk, probability_of_success, mc_prob_profit_no_dte, mc_prob_profit_with_dte, pricing_state, spread_type, symbol = spread
+            average_probability = (probability_of_success + mc_prob_profit_no_dte + mc_prob_profit_with_dte) / 3
+            spread_data.append([symbol, spread_type, exp, short_strike, long_strike, None, None, credit, max_loss, return_on_risk, probability_of_success, mc_prob_profit_no_dte, mc_prob_profit_with_dte, pricing_state, None, average_probability])
+        elif spread[-2] == 'iron_condor':
+            exp, short_put_strike, long_put_strike, short_call_strike, long_call_strike, credit, max_loss, return_on_risk, probability_of_success, mc_prob_profit_no_dte, mc_prob_profit_with_dte, pricing_state_put, pricing_state_call, spread_type, symbol = spread
+            average_probability = (probability_of_success + mc_prob_profit_no_dte + mc_prob_profit_with_dte) / 3
+            spread_data.append([symbol, spread_type, exp, short_put_strike, long_put_strike, short_call_strike, long_call_strike, credit, max_loss, return_on_risk, probability_of_success, mc_prob_profit_no_dte, mc_prob_profit_with_dte, pricing_state_put, pricing_state_call, average_probability])
 
-        spread_data = []
-        for spread in filtered_spreads[:top_n]:
-            if spread[-1] == 'bull_put':
-                exp, short_strike, long_strike, credit, max_loss, return_on_risk, probability_of_success, mc_prob_profit_no_dte, mc_prob_profit_with_dte, pricing_state, spread_type = spread
-                average_probability = (probability_of_success + mc_prob_profit_no_dte + mc_prob_profit_with_dte) / 3
-                spread_data.append([spread_type, exp, short_strike, long_strike, None, None, credit, max_loss, return_on_risk, probability_of_success, mc_prob_profit_no_dte, mc_prob_profit_with_dte, pricing_state, None, average_probability])
-            elif spread[-1] == 'iron_condor':
-                exp, short_put_strike, long_put_strike, short_call_strike, long_call_strike, credit, max_loss, return_on_risk, probability_of_success, mc_prob_profit_no_dte, mc_prob_profit_with_dte, pricing_state_put, pricing_state_call, spread_type = spread
-                average_probability = (probability_of_success + mc_prob_profit_no_dte + mc_prob_profit_with_dte) / 3
-                spread_data.append([spread_type, exp, short_put_strike, long_put_strike, short_call_strike, long_call_strike, credit, max_loss, return_on_risk, probability_of_success, mc_prob_profit_no_dte, mc_prob_profit_with_dte, pricing_state_put, pricing_state_call, average_probability])
-
-        return spread_data
+    return spread_data
 
 def plot_probabilities(spreads):
     bull_puts = [spread for spread in spreads if spread[0] == 'bull_put']
@@ -454,7 +463,7 @@ if __name__ == '__main__':
     startTime = datetime.datetime.now()
     argparser = argparse.ArgumentParser(description="Find and rank option spreads")
     
-    argparser.add_argument('-symbol', '-s', type=str, required=True, help='Stock symbol to fetch data for')
+    argparser.add_argument('-symbols', '-s', type=str, required=True, help='Comma-separated list of stock symbols to fetch data for')
     argparser.add_argument('-mindte', '-m', type=int, required=True, help='Minimum days to expiration')
     argparser.add_argument('-maxdte', '-l', type=int, required=True, help='Maximum days to expiration')
     argparser.add_argument('-top_n', '-n', type=int, default=10, help='Number of top spreads to display')
@@ -470,31 +479,26 @@ if __name__ == '__main__':
     argparser.add_argument('--plot', action='store_true', help='Show probability of profit plot')
     args = argparser.parse_args()
     
-    with Manager() as manager:
-        cache = manager.dict()
-        
-        underlying_price = get_stock_price(args.symbol, args.api_token)
-        volatility = get_historical_volatility(args.symbol, args.api_token, cache)
-        puts, calls = get_stock_data(args.symbol, args.mindte, args.maxdte, args.api_token)
-        
-        logger.info(f"Underlying price: {underlying_price}")
-        logger.info(f"Historical volatility: {volatility}")
+    symbols = args.symbols.split(',')
+    puts, calls = get_stock_data(symbols, args.mindte, args.maxdte, args.api_token)
 
-        best_spreads = find_best_spreads(puts, calls, underlying_price, args.top_n, args.min_ror, args.max_strike_dist, args.batch_size, args.simulations, volatility, args.include_iron_condors, args.risk_free_rate, args.api_token, args.symbol)
+    logger.info(f"Symbols: {symbols}")
 
-        logger.info(f"Best Spreads for {args.symbol} with min DTE {args.mindte} and max DTE {args.maxdte}")
-        df = pd.DataFrame(best_spreads, columns=['Type', 'Expiration', 'Short Put Strike', 'Long Put Strike', 'Short Call Strike', 'Long Call Strike', 'Credit', 'Max Loss', 'Return on Risk', 'Probability of Success', 'MC Probability of Profit (No DTE)', 'MC Probability of Profit (With DTE)', 'Pricing State (Put)', 'Pricing State (Call)', 'Average Probability'])
-        df.to_csv(args.output, index=False)
-        logger.info(f"Results saved to {args.output}")
+    best_spreads = find_best_spreads(symbols, puts, calls, args.top_n, args.min_ror, args.max_strike_dist, args.batch_size, args.simulations, args.risk_free_rate, args.api_token, args.include_iron_condors)
 
-        for spread in best_spreads:
-            if spread[0] == 'bull_put':
-                logger.info(f"Bull Put Spread:\n\tExpiration: {spread[1]}\n\tShort Strike: {spread[2]}\n\tLong Strike: {spread[3]}\n\tCredit: {spread[6]}\n\tMax Loss: {spread[7]}\n\tReturn on Risk: {spread[8]*100:.2f}%\n\tProbability of Success: {spread[9]*100:.2f}%\n\tMC Probability of Profit (No DTE): {spread[10]*100:.2f}%\n\tMC Probability of Profit (With DTE): {spread[11]*100:.2f}%\n\tPricing State: {spread[12]}")
-            elif spread[0] == 'iron_condor':
-                logger.info(f"Iron Condor:\n\tExpiration: {spread[1]}\n\tShort Put Strike: {spread[2]}\n\tLong Put Strike: {spread[3]}\n\tShort Call Strike: {spread[4]}\n\tLong Call Strike: {spread[5]}\n\tCredit: {spread[6]}\n\tMax Loss: {spread[7]}\n\tReturn on Risk: {spread[8]*100:.2f}%\n\tProbability of Success: {spread[9]*100:.2f}%\n\tMC Probability of Profit (No DTE): {spread[10]*100:.2f}%\n\tMC Probability of Profit (With DTE): {spread[11]*100:.2f}%\n\tPricing State (Put): {spread[12]}\n\tPricing State (Call): {spread[13]}")
+    logger.info(f"Best Spreads for symbols {symbols} with min DTE {args.mindte} and max DTE {args.maxdte}")
+    df = pd.DataFrame(best_spreads, columns=['Symbol', 'Type', 'Expiration', 'Short Put Strike', 'Long Put Strike', 'Short Call Strike', 'Long Call Strike', 'Credit', 'Max Loss', 'Return on Risk', 'Probability of Success', 'MC Probability of Profit (No DTE)', 'MC Probability of Profit (With DTE)', 'Pricing State (Put)', 'Pricing State (Call)', 'Average Probability'])
+    df.to_csv(args.output, index=False)
+    logger.info(f"Results saved to {args.output}")
 
-        if args.plot:
-            plot_probabilities(best_spreads)
+    for spread in best_spreads:
+        if spread[1] == 'bull_put':
+            logger.info(f"Bull Put Spread for {spread[0]}:\n\tExpiration: {spread[2]}\n\tShort Strike: {spread[3]}\n\tLong Strike: {spread[4]}\n\tCredit: {spread[7]}\n\tMax Loss: {spread[8]}\n\tReturn on Risk: {spread[9]*100:.2f}%\n\tProbability of Success: {spread[10]*100:.2f}%\n\tMC Probability of Profit (No DTE): {spread[11]*100:.2f}%\n\tMC Probability of Profit (With DTE): {spread[12]*100:.2f}%\n\tPricing State: {spread[13]}")
+        elif spread[1] == 'iron_condor':
+            logger.info(f"Iron Condor for {spread[0]}:\n\tExpiration: {spread[2]}\n\tShort Put Strike: {spread[3]}\n\tLong Put Strike: {spread[4]}\n\tShort Call Strike: {spread[5]}\n\tLong Call Strike: {spread[6]}\n\tCredit: {spread[7]}\n\tMax Loss: {spread[8]}\n\tReturn on Risk: {spread[9]*100:.2f}%\n\tProbability of Success: {spread[10]*100:.2f}%\n\tMC Probability of Profit (No DTE): {spread[11]*100:.2f}%\n\tMC Probability of Profit (With DTE): {spread[12]*100:.2f}%\n\tPricing State (Put): {spread[13]}\n\tPricing State (Call): {spread[14]}")
 
-        endTime = datetime.datetime.now()
-        logger.info(f"Time taken: {endTime - startTime}")
+    if args.plot:
+        plot_probabilities(best_spreads)
+
+    endTime = datetime.datetime.now()
+    logger.info(f"Time taken: {endTime - startTime}")
