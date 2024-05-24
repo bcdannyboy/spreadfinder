@@ -100,6 +100,7 @@ def get_historical_volatility(symbol, api_token, cache, days=252):
     res = model.fit(disp="off")
     forecast = res.forecast(horizon=1)
     annualized_volatility = np.sqrt(forecast.variance.values[-1, :][0]) * np.sqrt(days)
+    annualized_volatility = np.minimum(annualized_volatility, 2.0)  # Bound the annualized volatility
 
     cache[cache_key] = annualized_volatility
 
@@ -109,27 +110,47 @@ def get_historical_volatility_adjusted(symbol, api_token, dte, cache, days=252):
     annualized_volatility = get_historical_volatility(symbol, api_token, cache, days)
     adjusted_volatility = annualized_volatility * np.sqrt(dte / 365.0)
     return adjusted_volatility
+def monte_carlo_simulation(current_price, days, simulations, volatility, use_t_dist=False, df=3, log_return_cap=None, use_heston=False, kappa=2.0, theta=0.02, xi=0.1, rho=-0.7):
+    import numpy as np
+    from scipy.stats import t
 
-def monte_carlo_simulation(current_price, days, simulations, volatility, use_t_dist=False, df=3, log_return_cap=None):
     simulations = 2**int(np.ceil(np.log2(simulations)))
     dt = 1 / 252  # daily time step
 
-    if use_t_dist:
-        z = t.rvs(df, size=(simulations, days))
-    else:
-        z = np.random.normal(size=(simulations, days))
-    
-    log_returns = (volatility * np.sqrt(dt)) * z
-    
-    # Adjust log return cap
-    if log_return_cap is not None:
-        log_returns = np.clip(log_returns, -log_return_cap, log_return_cap)
-    
-    price_paths = current_price * np.exp(np.cumsum(log_returns, axis=1))
-    price_paths = np.hstack([np.full((simulations, 1), current_price), price_paths])
-    
-    return price_paths.T
+    if use_heston:
+        # Heston model parameters
+        Vt = np.full(simulations, volatility**2)
+        price_paths = np.zeros((days + 1, simulations))
+        price_paths[0] = current_price
 
+        for t in range(1, days + 1):
+            Z1 = np.random.normal(size=simulations)
+            Z2 = np.random.normal(size=simulations)
+            Z2 = rho * Z1 + np.sqrt(1 - rho**2) * Z2  # Correlate Z2 with Z1
+
+            Vt = np.maximum(0, Vt + kappa * (theta - Vt) * dt + xi * np.sqrt(Vt) * np.sqrt(dt) * Z1)
+            Vt = np.minimum(Vt, 4 * volatility**2)  # Bound the volatility to prevent explosion
+            price_paths[t] = price_paths[t-1] * np.exp((Vt - 0.5 * Vt) * dt + np.sqrt(Vt * dt) * Z2)
+
+        final_prices = price_paths[-1]
+        return price_paths
+    else:
+        if use_t_dist:
+            z = t.rvs(df, size=(simulations, days))
+        else:
+            z = np.random.normal(size=(simulations, days))
+        
+        log_returns = (volatility * np.sqrt(dt)) * z
+        
+        # Adjust log return cap
+        if log_return_cap is not None:
+            log_returns = np.clip(log_returns, -log_return_cap, log_return_cap)
+        
+        price_paths = current_price * np.exp(np.cumsum(log_returns, axis=1))
+        price_paths = np.hstack([np.full((simulations, 1), current_price), price_paths])
+        
+        final_prices = price_paths.T[-1]
+        return price_paths.T
 def black_scholes_price(option_type, S, K, T, r, sigma):
     d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
     d2 = d1 - sigma * np.sqrt(T)
@@ -252,7 +273,11 @@ def process_single_spread(i, j, put_chain, underlying_price, min_ror, max_strike
         mc_prices_with_dte = monte_carlo_simulation(underlying_price, int(time_to_expiration), simulations, adjusted_volatility, use_t_dist=True)
         mc_prob_profit_with_dte = np.mean(mc_prices_with_dte[-1] > short_put['strike']) if len(mc_prices_with_dte) > 1 else 0
 
-        return [(exp, short_put['strike'], long_put['strike'], credit, max_loss, return_on_risk, probability_of_success, mc_prob_profit_no_dte, mc_prob_profit_with_dte, pricing_state)]
+        # Heston Model Simulations
+        mc_prices_heston = monte_carlo_simulation(underlying_price, int(time_to_expiration), simulations, volatility, use_heston=True)
+        mc_prob_profit_heston = np.mean(mc_prices_heston[-1] > short_put['strike']) if len(mc_prices_heston) > 1 else 0
+
+        return [(exp, short_put['strike'], long_put['strike'], credit, max_loss, return_on_risk, probability_of_success, mc_prob_profit_no_dte, mc_prob_profit_with_dte, mc_prob_profit_heston, pricing_state)]
     return []
 
 def process_bull_put_spread(symbol, exp, put_chain, underlying_price, min_ror, max_strike_dist, simulations, volatility, risk_free_rate, api_token, cache):
@@ -324,16 +349,28 @@ def process_single_condor(i, j, k, l, put_chain, call_chain, underlying_price, m
         probability_of_success_call = 1 - norm.cdf(d1_call)
         probability_of_success = (probability_of_success_put + probability_of_success_call) / 2
 
-        # Monte Carlo Simulation
-        mc_prices = monte_carlo_simulation(underlying_price, int(time_to_expiration * 252), simulations, iv_put, use_t_dist=True)
-        mc_prob_profit_put = np.mean(mc_prices[-1] > short_put['strike'])
-        mc_prob_profit_call = np.mean(mc_prices[-1] < short_call['strike'])
-        mc_prob_profit = (mc_prob_profit_put + mc_prob_profit_call) / 2
+        # Monte Carlo Simulation with and without DTE adjustment
+        mc_prices_no_dte = monte_carlo_simulation(underlying_price, int(time_to_expiration), simulations, volatility, use_t_dist=True)
+        mc_prob_profit_put_no_dte = np.mean(mc_prices_no_dte[-1] > short_put['strike'])
+        mc_prob_profit_call_no_dte = np.mean(mc_prices_no_dte[-1] < short_call['strike'])
+        mc_prob_profit_no_dte = (mc_prob_profit_put_no_dte + mc_prob_profit_call_no_dte) / 2
 
-        return [(exp, short_put['strike'], long_put['strike'], short_call['strike'], long_call['strike'], credit, max_loss, return_on_risk, probability_of_success, mc_prob_profit, pricing_state_put, pricing_state_call)]
+        adjusted_volatility = get_historical_volatility_adjusted(symbol, api_token, time_to_expiration, cache)
+        mc_prices_with_dte = monte_carlo_simulation(underlying_price, int(time_to_expiration), simulations, adjusted_volatility, use_t_dist=True)
+        mc_prob_profit_put_with_dte = np.mean(mc_prices_with_dte[-1] > short_put['strike'])
+        mc_prob_profit_call_with_dte = np.mean(mc_prices_with_dte[-1] < short_call['strike'])
+        mc_prob_profit_with_dte = (mc_prob_profit_put_with_dte + mc_prob_profit_call_with_dte) / 2
+
+        # Heston Model Simulations
+        mc_prices_heston = monte_carlo_simulation(underlying_price, int(time_to_expiration), simulations, volatility, use_heston=True)
+        mc_prob_profit_put_heston = np.mean(mc_prices_heston[-1] > short_put['strike'])
+        mc_prob_profit_call_heston = np.mean(mc_prices_heston[-1] < short_call['strike'])
+        mc_prob_profit_heston = (mc_prob_profit_put_heston + mc_prob_profit_call_heston) / 2
+
+        return [(exp, short_put['strike'], long_put['strike'], short_call['strike'], long_call['strike'], credit, max_loss, return_on_risk, probability_of_success, mc_prob_profit_no_dte, mc_prob_profit_with_dte, mc_prob_profit_heston, pricing_state_put, pricing_state_call)]
     return []
 
-def process_iron_condor(symbol, exp, put_chain, call_chain, underlying_price, min_ror, max_strike_dist, simulations, volatility, risk_free_rate):
+def process_iron_condor(symbol, exp, put_chain, call_chain, underlying_price, min_ror, max_strike_dist, simulations, volatility, risk_free_rate, api_token, cache):
     results = []
     put_chain = put_chain.sort_values(by='strike')
     call_chain = call_chain.sort_values(by='strike')
@@ -379,13 +416,13 @@ def find_bull_put_spreads(puts, underlying_price, min_ror, max_strike_dist, batc
 
     return bull_put_spreads
 
-def find_iron_condors(puts, calls, underlying_price, min_ror, max_strike_dist, batch_size, simulations, volatility, risk_free_rate):
+def find_iron_condors(puts, calls, underlying_price, min_ror, max_strike_dist, batch_size, simulations, volatility, risk_free_rate, api_token, cache):
     logger.info(f"Finding iron condors for underlying price {underlying_price} using batch size {batch_size}")
     iron_condors = []
 
     with ProcessPoolExecutor(max_workers=os.cpu_count()) as executor:
         futures_iterator = (
-            executor.submit(process_iron_condor, symbol, exp, put_chain, call_chain, underlying_price, min_ror, max_strike_dist, simulations, volatility, risk_free_rate)
+            executor.submit(process_iron_condor, symbol, exp, put_chain, call_chain, underlying_price, min_ror, max_strike_dist, simulations, volatility, risk_free_rate, api_token, cache)
             for (symbol, exp, put_chain), (symbol_c, exp_c, call_chain) in zip(puts, calls)
             if symbol == symbol_c and exp == exp_c
         )
@@ -416,16 +453,16 @@ def find_best_spreads(symbols, puts, calls, top_n, min_ror, max_strike_dist, bat
                 combined_spreads.append(list((*spread, 'bull_put', symbol)))  # Convert tuple to list and add symbol
 
             if find_ic:
-                iron_condors = find_iron_condors(symbol_puts, symbol_calls, underlying_price, min_ror, max_strike_dist, batch_size, simulations, volatility, risk_free_rate)
+                iron_condors = find_iron_condors(symbol_puts, symbol_calls, underlying_price, min_ror, max_strike_dist, batch_size, simulations, volatility, risk_free_rate, api_token, cache)
                 for spread in iron_condors:
                     combined_spreads.append(list((*spread, 'iron_condor', symbol)))  # Convert tuple to list and add symbol
 
     # Filter out spreads that don't meet the minimum return on risk
     filtered_spreads = [spread for spread in combined_spreads if spread[5] >= min_ror]
 
-    # Calculate average probability using only Monte Carlo probabilities
+    # Calculate average probability using all Monte Carlo probabilities
     for spread in filtered_spreads:
-        spread.append((spread[7] + spread[8]) / 2)  # Adding average_probability using only MC probabilities
+        spread.append((spread[7] + spread[8] + spread[9]) / 3)  # Adding average_probability using all MC probabilities
 
     # Sort by average probability, prioritizing the highest probabilities
     filtered_spreads.sort(key=lambda x: x[-1], reverse=True)
@@ -433,11 +470,11 @@ def find_best_spreads(symbols, puts, calls, top_n, min_ror, max_strike_dist, bat
     spread_data = []
     for spread in filtered_spreads[:top_n]:
         if spread[-3] == 'bull_put':
-            exp, short_strike, long_strike, credit, max_loss, return_on_risk, probability_of_success, mc_prob_profit_no_dte, mc_prob_profit_with_dte, pricing_state, spread_type, symbol, average_probability = spread
-            spread_data.append([symbol, spread_type, exp, short_strike, long_strike, None, None, credit, max_loss, return_on_risk, probability_of_success, mc_prob_profit_no_dte, mc_prob_profit_with_dte, pricing_state, None, average_probability])
+            exp, short_strike, long_strike, credit, max_loss, return_on_risk, probability_of_success, mc_prob_profit_no_dte, mc_prob_profit_with_dte, mc_prob_profit_heston, pricing_state, spread_type, symbol, average_probability = spread
+            spread_data.append([symbol, spread_type, exp, short_strike, long_strike, None, None, credit, max_loss, return_on_risk, probability_of_success, mc_prob_profit_no_dte, mc_prob_profit_with_dte, mc_prob_profit_heston, pricing_state, None, average_probability])
         elif spread[-3] == 'iron_condor':
-            exp, short_put_strike, long_put_strike, short_call_strike, long_call_strike, credit, max_loss, return_on_risk, probability_of_success, mc_prob_profit_no_dte, mc_prob_profit_with_dte, pricing_state_put, pricing_state_call, spread_type, symbol, average_probability = spread
-            spread_data.append([symbol, spread_type, exp, short_put_strike, long_put_strike, short_call_strike, long_call_strike, credit, max_loss, return_on_risk, probability_of_success, mc_prob_profit_no_dte, mc_prob_profit_with_dte, pricing_state_put, pricing_state_call, average_probability])
+            exp, short_put_strike, long_put_strike, short_call_strike, long_call_strike, credit, max_loss, return_on_risk, probability_of_success, mc_prob_profit_no_dte, mc_prob_profit_with_dte, mc_prob_profit_heston, pricing_state_put, pricing_state_call, spread_type, symbol, average_probability = spread
+            spread_data.append([symbol, spread_type, exp, short_put_strike, long_put_strike, short_call_strike, long_call_strike, credit, max_loss, return_on_risk, probability_of_success, mc_prob_profit_no_dte, mc_prob_profit_with_dte, mc_prob_profit_heston, pricing_state_put, pricing_state_call, average_probability])
 
     return spread_data
 
@@ -448,16 +485,18 @@ def plot_probabilities(spreads):
     fig, axes = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
     
     if bull_puts:
-        exp_dates, no_dte_probs, with_dte_probs = zip(*[(spread[1], spread[10], spread[11]) for spread in bull_puts])
+        exp_dates, no_dte_probs, with_dte_probs, heston_probs = zip(*[(spread[2], spread[11], spread[12], spread[13]) for spread in bull_puts])
         axes[0].plot(exp_dates, no_dte_probs, label='No DTE Adjustment')
         axes[0].plot(exp_dates, with_dte_probs, label='With DTE Adjustment')
+        axes[0].plot(exp_dates, heston_probs, label='Heston Model')
         axes[0].set_title('Bull Put Spreads')
         axes[0].legend()
 
     if iron_condors:
-        exp_dates, no_dte_probs, with_dte_probs = zip(*[(spread[1], spread[10], spread[11]) for spread in iron_condors])
+        exp_dates, no_dte_probs, with_dte_probs, heston_probs = zip(*[(spread[2], spread[11], spread[12], spread[13]) for spread in iron_condors])
         axes[1].plot(exp_dates, no_dte_probs, label='No DTE Adjustment')
         axes[1].plot(exp_dates, with_dte_probs, label='With DTE Adjustment')
+        axes[1].plot(exp_dates, heston_probs, label='Heston Model')
         axes[1].set_title('Iron Condors')
         axes[1].legend()
 
@@ -481,10 +520,9 @@ if __name__ == '__main__':
     argparser.add_argument('-api_token', type=str, required=True, help='Tradier API token')
     argparser.add_argument('-simulations', type=int, default=1000, help='Number of Monte Carlo simulations')
     argparser.add_argument('-risk_free_rate', '-rf', type=float, default=0.01, help='Risk-free interest rate')
-    argparser.add_argument('--use_heston', action='store_true', help='Use Heston model for simulations')
     argparser.add_argument('--plot', action='store_true', help='Show probability of profit plot')
     args = argparser.parse_args()
-    
+
     symbols = args.symbols.split(',')
     puts, calls = get_stock_data(symbols, args.mindte, args.maxdte, args.api_token)
 
@@ -493,15 +531,15 @@ if __name__ == '__main__':
     best_spreads = find_best_spreads(symbols, puts, calls, args.top_n, args.min_ror, args.max_strike_dist, args.batch_size, args.simulations, args.risk_free_rate, args.api_token, args.include_iron_condors)
 
     logger.info(f"Best Spreads for symbols {symbols} with min DTE {args.mindte} and max DTE {args.maxdte}")
-    df = pd.DataFrame(best_spreads, columns=['Symbol', 'Type', 'Expiration', 'Short Put Strike', 'Long Put Strike', 'Short Call Strike', 'Long Call Strike', 'Credit', 'Max Loss', 'Return on Risk', 'Chain Probability of Success', 'MC Probability of Profit (No DTE)', 'MC Probability of Profit (With DTE)', 'Pricing State (Put)', 'Pricing State (Call)', 'Average Probability'])
+    df = pd.DataFrame(best_spreads, columns=['Symbol', 'Type', 'Expiration', 'Short Put Strike', 'Long Put Strike', 'Short Call Strike', 'Long Call Strike', 'Credit', 'Max Loss', 'Return on Risk', 'Chain Probability of Success', 'MC Probability of Profit (No DTE)', 'MC Probability of Profit (With DTE)', 'MC Probability of Profit (Heston)', 'Pricing State (Put)', 'Pricing State (Call)', 'Average Probability'])
     df.to_csv(args.output, index=False)
     logger.info(f"Results saved to {args.output}")
 
     for spread in best_spreads:
         if spread[1] == 'bull_put':
-            logger.info(f"Bull Put Spread for {spread[0]}:\n\tExpiration: {spread[2]}\n\tShort Strike: {spread[3]}\n\tLong Strike: {spread[4]}\n\tCredit: {spread[7]}\n\tMax Loss: {spread[8]}\n\tReturn on Risk: {spread[9]*100:.2f}%\n\tChain Probability of Success: {spread[10]*100:.2f}%\n\tMC Probability of Profit (No DTE): {spread[11]*100:.2f}%\n\tMC Probability of Profit (With DTE): {spread[12]*100:.2f}%\n\tPricing State: {spread[13]}")
+            logger.info(f"Bull Put Spread for {spread[0]}:\n\tExpiration: {spread[2]}\n\tShort Strike: {spread[3]}\n\tLong Strike: {spread[4]}\n\tCredit: {spread[7]}\n\tMax Loss: {spread[8]}\n\tReturn on Risk: {spread[9]*100:.2f}%\n\tChain Probability of Success: {spread[10]*100:.2f}%\n\tMC Probability of Profit (No DTE): {spread[11]*100:.2f}%\n\tMC Probability of Profit (With DTE): {spread[12]*100:.2f}%\n\tMC Probability of Profit (Heston): {spread[13]*100:.2f}%\n\tPricing State: {spread[14]}")
         elif spread[1] == 'iron_condor':
-            logger.info(f"Iron Condor for {spread[0]}:\n\tExpiration: {spread[2]}\n\tShort Put Strike: {spread[3]}\n\tLong Put Strike: {spread[4]}\n\tShort Call Strike: {spread[5]}\n\tLong Call Strike: {spread[6]}\n\tCredit: {spread[7]}\n\tMax Loss: {spread[8]}\n\tReturn on Risk: {spread[9]*100:.2f}%\n\tChain Probability of Success: {spread[10]*100:.2f}%\n\tMC Probability of Profit (No DTE): {spread[11]*100:.2f}%\n\tMC Probability of Profit (With DTE): {spread[12]*100:.2f}%\n\tPricing State (Put): {spread[13]}\n\tPricing State (Call): {spread[14]}")
+            logger.info(f"Iron Condor for {spread[0]}:\n\tExpiration: {spread[2]}\n\tShort Put Strike: {spread[3]}\n\tLong Put Strike: {spread[4]}\n\tShort Call Strike: {spread[5]}\n\tLong Call Strike: {spread[6]}\n\tCredit: {spread[7]}\n\tMax Loss: {spread[8]}\n\tReturn on Risk: {spread[9]*100:.2f}%\n\tChain Probability of Success: {spread[10]*100:.2f}%\n\tMC Probability of Profit (No DTE): {spread[11]*100:.2f}%\n\tMC Probability of Profit (With DTE): {spread[12]*100:.2f}%\n\tMC Probability of Profit (Heston): {spread[13]*100:.2f}%\n\tPricing State (Put): {spread[14]}\n\tPricing State (Call): {spread[15]}")
 
     if args.plot:
         plot_probabilities(best_spreads)
