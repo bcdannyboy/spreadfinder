@@ -55,7 +55,7 @@ pip install -r requirements.txt
 ## Usage
 
 ```sh
-python spreadfinder.py -symbols SYMBOL,SYMBOL -mindte MINDTE -maxdte MAXDTE [-top_n TOP_N] [-min_ror MIN_ROR] [-max_strike_dist MAX_STRIKE_DIST] [-output OUTPUT] [-batch_size BATCH_SIZE] -api_token API_TOKEN [--include_iron_condors] [-simulations SIMULATIONS] [-risk_free_rate RISK_FREE_RATE] [--use_heston]
+python spreadfinder.py -symbols SYMBOL,SYMBOL -mindte MINDTE -maxdte MAXDTE [-top_n TOP_N] [-min_ror MIN_ROR] [-max_strike_dist MAX_STRIKE_DIST] [-output OUTPUT] [-batch_size BATCH_SIZE] -api_token API_TOKEN [--include_iron_condors] [-simulations SIMULATIONS] [-risk_free_rate RISK_FREE_RATE] [--plot]
 ```
 
 ### Arguments
@@ -72,7 +72,6 @@ python spreadfinder.py -symbols SYMBOL,SYMBOL -mindte MINDTE -maxdte MAXDTE [-to
 - `--include_iron_condors`: Include iron condor spreads (default: False).
 - `-simulations`, `-sim`: Number of Monte Carlo simulations to run (default: 1000).
 - `-risk_free_rate`, `-rf`: Risk-free rate for option pricing (default: 0.01).
-- `--use_heston`: Use Heston model for simulations (default: False).
 - `--plot`: Plot the probabilities (default: False).
 
 ### Example
