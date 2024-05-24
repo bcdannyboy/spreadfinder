@@ -419,18 +419,20 @@ def find_best_spreads(symbols, puts, calls, top_n, min_ror, max_strike_dist, bat
     # Filter out spreads that don't meet the minimum return on risk
     filtered_spreads = [spread for spread in combined_spreads if spread[5] >= min_ror]
 
-    # Sort by probability of success, prioritizing the highest probabilities
-    filtered_spreads.sort(key=lambda x: x[6], reverse=True)
+    # Calculate average probability
+    for spread in filtered_spreads:
+        spread.append((spread[6] + spread[7] + spread[8]) / 3)  # Adding average_probability to the spread
+
+    # Sort by average probability, prioritizing the highest probabilities
+    filtered_spreads.sort(key=lambda x: x[-1], reverse=True)
 
     spread_data = []
     for spread in filtered_spreads[:top_n]:
-        if spread[-2] == 'bull_put':
-            exp, short_strike, long_strike, credit, max_loss, return_on_risk, probability_of_success, mc_prob_profit_no_dte, mc_prob_profit_with_dte, pricing_state, spread_type, symbol = spread
-            average_probability = (probability_of_success + mc_prob_profit_no_dte + mc_prob_profit_with_dte) / 3
+        if spread[-3] == 'bull_put':
+            exp, short_strike, long_strike, credit, max_loss, return_on_risk, probability_of_success, mc_prob_profit_no_dte, mc_prob_profit_with_dte, pricing_state, spread_type, symbol, average_probability = spread
             spread_data.append([symbol, spread_type, exp, short_strike, long_strike, None, None, credit, max_loss, return_on_risk, probability_of_success, mc_prob_profit_no_dte, mc_prob_profit_with_dte, pricing_state, None, average_probability])
-        elif spread[-2] == 'iron_condor':
-            exp, short_put_strike, long_put_strike, short_call_strike, long_call_strike, credit, max_loss, return_on_risk, probability_of_success, mc_prob_profit_no_dte, mc_prob_profit_with_dte, pricing_state_put, pricing_state_call, spread_type, symbol = spread
-            average_probability = (probability_of_success + mc_prob_profit_no_dte + mc_prob_profit_with_dte) / 3
+        elif spread[-3] == 'iron_condor':
+            exp, short_put_strike, long_put_strike, short_call_strike, long_call_strike, credit, max_loss, return_on_risk, probability_of_success, mc_prob_profit_no_dte, mc_prob_profit_with_dte, pricing_state_put, pricing_state_call, spread_type, symbol, average_probability = spread
             spread_data.append([symbol, spread_type, exp, short_put_strike, long_put_strike, short_call_strike, long_call_strike, credit, max_loss, return_on_risk, probability_of_success, mc_prob_profit_no_dte, mc_prob_profit_with_dte, pricing_state_put, pricing_state_call, average_probability])
 
     return spread_data
