@@ -493,15 +493,15 @@ if __name__ == '__main__':
     best_spreads = find_best_spreads(symbols, puts, calls, args.top_n, args.min_ror, args.max_strike_dist, args.batch_size, args.simulations, args.risk_free_rate, args.api_token, args.include_iron_condors)
 
     logger.info(f"Best Spreads for symbols {symbols} with min DTE {args.mindte} and max DTE {args.maxdte}")
-    df = pd.DataFrame(best_spreads, columns=['Symbol', 'Type', 'Expiration', 'Short Put Strike', 'Long Put Strike', 'Short Call Strike', 'Long Call Strike', 'Credit', 'Max Loss', 'Return on Risk', 'Probability of Success', 'MC Probability of Profit (No DTE)', 'MC Probability of Profit (With DTE)', 'Pricing State (Put)', 'Pricing State (Call)', 'Average Probability'])
+    df = pd.DataFrame(best_spreads, columns=['Symbol', 'Type', 'Expiration', 'Short Put Strike', 'Long Put Strike', 'Short Call Strike', 'Long Call Strike', 'Credit', 'Max Loss', 'Return on Risk', 'Chain Probability of Success', 'MC Probability of Profit (No DTE)', 'MC Probability of Profit (With DTE)', 'Pricing State (Put)', 'Pricing State (Call)', 'Average Probability'])
     df.to_csv(args.output, index=False)
     logger.info(f"Results saved to {args.output}")
 
     for spread in best_spreads:
         if spread[1] == 'bull_put':
-            logger.info(f"Bull Put Spread for {spread[0]}:\n\tExpiration: {spread[2]}\n\tShort Strike: {spread[3]}\n\tLong Strike: {spread[4]}\n\tCredit: {spread[7]}\n\tMax Loss: {spread[8]}\n\tReturn on Risk: {spread[9]*100:.2f}%\n\tProbability of Success: {spread[10]*100:.2f}%\n\tMC Probability of Profit (No DTE): {spread[11]*100:.2f}%\n\tMC Probability of Profit (With DTE): {spread[12]*100:.2f}%\n\tPricing State: {spread[13]}")
+            logger.info(f"Bull Put Spread for {spread[0]}:\n\tExpiration: {spread[2]}\n\tShort Strike: {spread[3]}\n\tLong Strike: {spread[4]}\n\tCredit: {spread[7]}\n\tMax Loss: {spread[8]}\n\tReturn on Risk: {spread[9]*100:.2f}%\n\tChain Probability of Success: {spread[10]*100:.2f}%\n\tMC Probability of Profit (No DTE): {spread[11]*100:.2f}%\n\tMC Probability of Profit (With DTE): {spread[12]*100:.2f}%\n\tPricing State: {spread[13]}")
         elif spread[1] == 'iron_condor':
-            logger.info(f"Iron Condor for {spread[0]}:\n\tExpiration: {spread[2]}\n\tShort Put Strike: {spread[3]}\n\tLong Put Strike: {spread[4]}\n\tShort Call Strike: {spread[5]}\n\tLong Call Strike: {spread[6]}\n\tCredit: {spread[7]}\n\tMax Loss: {spread[8]}\n\tReturn on Risk: {spread[9]*100:.2f}%\n\tProbability of Success: {spread[10]*100:.2f}%\n\tMC Probability of Profit (No DTE): {spread[11]*100:.2f}%\n\tMC Probability of Profit (With DTE): {spread[12]*100:.2f}%\n\tPricing State (Put): {spread[13]}\n\tPricing State (Call): {spread[14]}")
+            logger.info(f"Iron Condor for {spread[0]}:\n\tExpiration: {spread[2]}\n\tShort Put Strike: {spread[3]}\n\tLong Put Strike: {spread[4]}\n\tShort Call Strike: {spread[5]}\n\tLong Call Strike: {spread[6]}\n\tCredit: {spread[7]}\n\tMax Loss: {spread[8]}\n\tReturn on Risk: {spread[9]*100:.2f}%\n\tChain Probability of Success: {spread[10]*100:.2f}%\n\tMC Probability of Profit (No DTE): {spread[11]*100:.2f}%\n\tMC Probability of Profit (With DTE): {spread[12]*100:.2f}%\n\tPricing State (Put): {spread[13]}\n\tPricing State (Call): {spread[14]}")
 
     if args.plot:
         plot_probabilities(best_spreads)
