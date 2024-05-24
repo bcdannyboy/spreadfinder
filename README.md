@@ -1,14 +1,14 @@
 # SpreadFinder
 
-SpreadFinder is a Python tool designed to identify and rank optimal options spreads based on various criteria such as probability of success, return on risk (ROR), and options pricing. The tool supports both bull put spreads and iron condor spreads for a specified stock symbol within a given date range.
+SpreadFinder is a Python tool designed to identify and rank optimal options spreads based on various criteria such as probability of success, return on risk (ROR), and options pricing. The tool supports both bull put spreads and iron condor spreads for specified stock symbols within a given date range.
 
 ## Features
 
-- Fetches option chains for a specified stock symbol within a given date range.
+- Fetches option chains for specified stock symbols within a given date range.
 - Identifies and ranks the following spreads:
   - Bull Put
   - Iron Condor
-- Utilizes Sobol-sequencing based Monte Carlo simulations to estimate probabilities of profit.
+- Utilizes Monte Carlo simulations to estimate probabilities of profit.
 - Employs Black-Scholes option pricing.
 - Implements Binomial pricing for American options.
 - Uses GARCH model for estimating historical volatility.
@@ -55,12 +55,12 @@ pip install -r requirements.txt
 ## Usage
 
 ```sh
-python spreadfinder.py -symbol SYMBOL -mindte MINDTE -maxdte MAXDTE [-top_n TOP_N] [-min_ror MIN_ROR] [-max_strike_dist MAX_STRIKE_DIST] [-output OUTPUT] [-batch_size BATCH_SIZE] -api_token API_TOKEN [--include_iron_condors] [-simulations SIMULATIONS] [-risk_free_rate RISK_FREE_RATE] [--use_heston]
+python spreadfinder.py -symbols SYMBOL,SYMBOL -mindte MINDTE -maxdte MAXDTE [-top_n TOP_N] [-min_ror MIN_ROR] [-max_strike_dist MAX_STRIKE_DIST] [-output OUTPUT] [-batch_size BATCH_SIZE] -api_token API_TOKEN [--include_iron_condors] [-simulations SIMULATIONS] [-risk_free_rate RISK_FREE_RATE] [--use_heston]
 ```
 
 ### Arguments
 
-- `-symbol`, `-s`: Stock symbol to fetch data for (required).
+- `-symbols`, `-s`: Comma Seperated List of stock symbols to fetch data for (required).
 - `-mindte`, `-m`: Minimum days to expiration (required).
 - `-maxdte`, `-l`: Maximum days to expiration (required).
 - `-top_n`, `-n`: Number of top spreads to display (default: 10).
@@ -78,10 +78,10 @@ python spreadfinder.py -symbol SYMBOL -mindte MINDTE -maxdte MAXDTE [-top_n TOP_
 ### Example
 
 ```sh
-python spreadfinder.py -symbol AAPL -mindte 30 -maxdte 60 -top_n 5 -min_ror 0.2 -max_strike_dist 0.15 -output aapl_spreads.csv -api_token YOUR_API_TOKEN -simulations 1000
+python spreadfinder.py -symbol AAPL,MSFT,GOOG -mindte 30 -maxdte 60 -top_n 5 -min_ror 0.2 -max_strike_dist 0.15 -output amg_spreads.csv -api_token YOUR_API_TOKEN -simulations 1000
 ```
 
-This command fetches option chains for AAPL with expirations between 30 and 60 days, calculates historical volatility using the GARCH model, finds the top 5 spreads with a minimum return on risk of 20% and a maximum strike distance of 15%, runs 1000 Monte Carlo simulations for each spread using Student's t-distribution, and saves the results to aapl_spreads.csv.
+This command fetches option chains for AAPL, MSFT, and GOOG with expirations between 30 and 60 days, calculates historical volatility using the GARCH model, finds the top 5 spreads with a minimum return on risk of 20% and a maximum strike distance of 15%, runs 1000 Monte Carlo simulations for each spread using Student's t-distribution, and saves the results to amg_spreads.csv.
 
 ### Additional Notes
 
@@ -96,6 +96,7 @@ The Heston model is a stochastic volatility model that assumes volatility is not
 
 ### Notes
 
+- Iron Condors take **super** long right now
 - Ensure you have a valid Tradier API token to fetch real-time options data.
 - Tradier API requests are rate limited to 60/minute.
 - When calculating volatility, the monte-carlo simulation uses the GARCH model both with and without taking into account the DTE of the options you're searching for.
@@ -105,9 +106,9 @@ The Heston model is a stochastic volatility model that assumes volatility is not
 
 - [ ] Better visualizations
 - [ ] More spreads
+- [ ] faster iron condors
 - [ ] Time-series forecasting for volatility and price estimates
 - [ ] More advanced option pricing models
-- [ ] Multi-ticker support
 - [ ] greeks calculations / analysis
 - [ ] Probability of profit @ 21DTE
   - 21 DTE management is a tastytrades recommendation
