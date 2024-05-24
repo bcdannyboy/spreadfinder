@@ -12,9 +12,12 @@ SpreadFinder is a Python tool designed to identify and rank optimal options spre
 - Employs Black-Scholes option pricing.
 - Implements Binomial pricing for American options.
 - Uses GARCH model for estimating historical volatility.
+  - Estimates volatility with / without taking the searched options DTE into account.
 - Provides the Heston model for stochastic volatility simulations.
 - Supports Student's t-distribution in Monte Carlo simulations for better tail risk modeling.
 - Outputs the top spreads to a CSV file.
+- Includes very basic visualization of the probabilities.
+- Volatility caching for faster processing.
 
 ## Requirements
 
@@ -27,6 +30,7 @@ SpreadFinder is a Python tool designed to identify and rank optimal options spre
 - `pandas`
 - `scipy`
 - `arch`
+- `ratelimit`
 
 ## Installation
 
@@ -69,6 +73,7 @@ python spreadfinder.py -symbol SYMBOL -mindte MINDTE -maxdte MAXDTE [-top_n TOP_
 - `-simulations`, `-sim`: Number of Monte Carlo simulations to run (default: 1000).
 - `-risk_free_rate`, `-rf`: Risk-free rate for option pricing (default: 0.01).
 - `--use_heston`: Use Heston model for simulations (default: False).
+- `--plot`: Plot the probabilities (default: False).
 
 ### Example
 
@@ -89,4 +94,20 @@ The Student's t-distribution is used in Monte Carlo simulations to model the hea
 #### Heston Model
 The Heston model is a stochastic volatility model that assumes volatility is not constant but follows its own random process. It is widely used for pricing derivatives and capturing the empirical features of market data, such as volatility clustering and the leverage effect.
 
-**Ensure you have a valid Tradier API token to fetch real-time options data. When selling options, you typically want to identify spreads that are fairly priced or overpriced to maximize your return on risk.**
+### Notes
+
+- Ensure you have a valid Tradier API token to fetch real-time options data.
+- Tradier API requests are rate limited to 60/minute.
+- When calculating volatility, the monte-carlo simulation uses the GARCH model both with and without taking into account the DTE of the options you're searching for.
+- When selling options, you typically want to identify spreads that are fairly priced or overpriced to maximize your return on risk.
+
+### TODO
+
+- [ ] Better visualizations
+- [ ] More spreads
+- [ ] Time-series forecasting for volatility and price estimates
+- [ ] More advanced option pricing models
+- [ ] Multi-ticker support
+- [ ] greeks calculations / analysis
+- [ ] Probability of profit @ 21DTE
+  - 21 DTE management is a tastytrades recommendation
