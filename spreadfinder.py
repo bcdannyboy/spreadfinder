@@ -110,10 +110,8 @@ def get_historical_volatility_adjusted(symbol, api_token, dte, cache, days=252):
     adjusted_volatility = annualized_volatility * np.sqrt(dte / 365.0)
     return adjusted_volatility
 
-def monte_carlo_simulation(current_price, days, simulations, volatility, use_t_dist=False, df=3, log_return_cap=10):
-    # Ensure the number of simulations is a power of two
+def monte_carlo_simulation(current_price, days, simulations, volatility, use_t_dist=False, df=3, log_return_cap=None):
     simulations = 2**int(np.ceil(np.log2(simulations)))
-
     dt = 1 / 252  # daily time step
 
     if use_t_dist:
@@ -123,8 +121,9 @@ def monte_carlo_simulation(current_price, days, simulations, volatility, use_t_d
     
     log_returns = (volatility * np.sqrt(dt)) * z
     
-    # Cap log returns to prevent overflow
-    log_returns = np.clip(log_returns, -log_return_cap, log_return_cap)
+    # Adjust log return cap
+    if log_return_cap is not None:
+        log_returns = np.clip(log_returns, -log_return_cap, log_return_cap)
     
     price_paths = current_price * np.exp(np.cumsum(log_returns, axis=1))
     price_paths = np.hstack([np.full((simulations, 1), current_price), price_paths])
@@ -190,7 +189,7 @@ def get_stock_data(symbols, mindte, maxdte, api_token):
             except ValueError as e:
                 logger.error(f"Error parsing expiration date: {exp}, error: {e}")
 
-        with ProcessPoolExecutor(max_workers=8) as executor:
+        with ProcessPoolExecutor(max_workers=os.cpu_count()) as executor:
             futures = {executor.submit(get_option_chain, symbol, exp, api_token): exp for exp in valid_exp}
             for future in as_completed(futures):
                 exp = futures[future]
@@ -224,6 +223,11 @@ def process_single_spread(i, j, put_chain, underlying_price, min_ror, max_strike
             return []
 
         time_to_expiration = (datetime.datetime.strptime(exp, '%Y-%m-%d') - datetime.datetime.now()).days
+
+        # Ensure 'greeks' key exists and 'mid_iv' is not None
+        if 'greeks' not in short_put or short_put['greeks'] is None or 'mid_iv' not in short_put['greeks'] or short_put['greeks']['mid_iv'] is None:
+            return []
+
         iv = short_put['greeks']['mid_iv']
         if iv is None or iv <= 0:
             return []
@@ -419,9 +423,9 @@ def find_best_spreads(symbols, puts, calls, top_n, min_ror, max_strike_dist, bat
     # Filter out spreads that don't meet the minimum return on risk
     filtered_spreads = [spread for spread in combined_spreads if spread[5] >= min_ror]
 
-    # Calculate average probability
+    # Calculate average probability using only Monte Carlo probabilities
     for spread in filtered_spreads:
-        spread.append((spread[6] + spread[7] + spread[8]) / 3)  # Adding average_probability to the spread
+        spread.append((spread[7] + spread[8]) / 2)  # Adding average_probability using only MC probabilities
 
     # Sort by average probability, prioritizing the highest probabilities
     filtered_spreads.sort(key=lambda x: x[-1], reverse=True)
