@@ -37,7 +37,7 @@ SpreadFinder is a Python tool designed to identify and rank optimal options spre
 Clone the repository:
 
 ```sh
-git clone https://github.com/yourusername/spreadfinder.git
+git clone https://github.com/bcdannyboy/spreadfinder.git
 ```
 
 Change to the project directory:
