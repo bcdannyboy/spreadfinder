@@ -6,3 +6,4 @@ pandas
 scipy
 arch
 ratelimit
+pgmpy

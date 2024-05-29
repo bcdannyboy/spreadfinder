@@ -9,6 +9,7 @@ SpreadFinder is a Python tool designed to identify and rank optimal options spre
   - Bull Put
   - Iron Condor
 - Utilizes Monte Carlo simulations to estimate probabilities of profit.
+  - Implements Latin Hypercube sampling for more efficient simulations.
 - Employs Black-Scholes option pricing.
 - Implements Binomial pricing for American options.
 - Uses GARCH model for estimating historical volatility.
@@ -32,6 +33,7 @@ SpreadFinder is a Python tool designed to identify and rank optimal options spre
 - `scipy`
 - `arch`
 - `ratelimit`
+- `pgmpy`
 
 ## Installation
 

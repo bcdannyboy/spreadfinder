@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import requests
 import matplotlib.pyplot as plt
-from scipy.stats import norm, t
+from scipy.stats import norm, t, qmc
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import os
 import logging
@@ -113,16 +113,24 @@ def get_historical_volatility_adjusted(symbol, api_token, dte, cache, days=252):
     return adjusted_volatility
 
 def monte_carlo_simulation(current_price, days, simulations, volatility, use_t_dist=False, df=3, log_return_cap=None, use_heston=False, kappa=2.0, theta=0.02, xi=0.1, rho=-0.7):
-    from scipy.stats import t  # Add this import statement
+    from scipy.stats import t
     dt = 1 / 252  # daily time step
     simulations = 2**int(np.ceil(np.log2(simulations)))  # Ensure power of 2
+
+    # Generate samples using Latin Hypercube Sampling
+    lhs_sampler = qmc.LatinHypercube(d=days)
+    lhs_samples = lhs_sampler.random(n=simulations)
+    if use_t_dist:
+        lhs_samples = t.ppf(lhs_samples, df)
+    else:
+        lhs_samples = norm.ppf(lhs_samples)
 
     if use_heston:
         # Vectorized Heston model implementation
         Vt = np.full(simulations, volatility**2)
         price_paths = np.zeros((days + 1, simulations))
         price_paths[0] = current_price
-        Z1 = np.random.normal(size=(days, simulations))
+        Z1 = lhs_samples.T
         Z2 = np.random.normal(size=(days, simulations))
         Z2 = rho * Z1 + np.sqrt(1 - rho**2) * Z2
 
@@ -134,8 +142,7 @@ def monte_carlo_simulation(current_price, days, simulations, volatility, use_t_d
         final_prices = price_paths[-1]
         return price_paths
 
-    z = t.rvs(df, size=(simulations, days)) if use_t_dist else np.random.normal(size=(simulations, days))
-    log_returns = (volatility * np.sqrt(dt)) * z
+    log_returns = (volatility * np.sqrt(dt)) * lhs_samples
     log_returns = np.clip(log_returns, -log_return_cap, log_return_cap) if log_return_cap else log_returns
 
     price_paths = current_price * np.exp(np.cumsum(log_returns, axis=1))
