@@ -110,47 +110,37 @@ def get_historical_volatility_adjusted(symbol, api_token, dte, cache, days=252):
     annualized_volatility = get_historical_volatility(symbol, api_token, cache, days)
     adjusted_volatility = annualized_volatility * np.sqrt(dte / 365.0)
     return adjusted_volatility
-def monte_carlo_simulation(current_price, days, simulations, volatility, use_t_dist=False, df=3, log_return_cap=None, use_heston=False, kappa=2.0, theta=0.02, xi=0.1, rho=-0.7):
-    import numpy as np
-    from scipy.stats import t
 
-    simulations = 2**int(np.ceil(np.log2(simulations)))
+def monte_carlo_simulation(current_price, days, simulations, volatility, use_t_dist=False, df=3, log_return_cap=None, use_heston=False, kappa=2.0, theta=0.02, xi=0.1, rho=-0.7):
     dt = 1 / 252  # daily time step
+    simulations = 2**int(np.ceil(np.log2(simulations)))  # Ensure power of 2
 
     if use_heston:
-        # Heston model parameters
+        # Vectorized Heston model implementation
         Vt = np.full(simulations, volatility**2)
         price_paths = np.zeros((days + 1, simulations))
         price_paths[0] = current_price
+        Z1 = np.random.normal(size=(days, simulations))
+        Z2 = np.random.normal(size=(days, simulations))
+        Z2 = rho * Z1 + np.sqrt(1 - rho**2) * Z2
 
         for t in range(1, days + 1):
-            Z1 = np.random.normal(size=simulations)
-            Z2 = np.random.normal(size=simulations)
-            Z2 = rho * Z1 + np.sqrt(1 - rho**2) * Z2  # Correlate Z2 with Z1
-
-            Vt = np.maximum(0, Vt + kappa * (theta - Vt) * dt + xi * np.sqrt(Vt) * np.sqrt(dt) * Z1)
-            Vt = np.minimum(Vt, 4 * volatility**2)  # Bound the volatility to prevent explosion
-            price_paths[t] = price_paths[t-1] * np.exp((Vt - 0.5 * Vt) * dt + np.sqrt(Vt * dt) * Z2)
+            Vt = np.maximum(0, Vt + kappa * (theta - Vt) * dt + xi * np.sqrt(Vt) * np.sqrt(dt) * Z1[t-1])
+            Vt = np.minimum(Vt, 4 * volatility**2)  # Bound volatility
+            price_paths[t] = price_paths[t-1] * np.exp((Vt - 0.5 * Vt) * dt + np.sqrt(Vt * dt) * Z2[t-1])
 
         final_prices = price_paths[-1]
         return price_paths
-    else:
-        if use_t_dist:
-            z = t.rvs(df, size=(simulations, days))
-        else:
-            z = np.random.normal(size=(simulations, days))
-        
-        log_returns = (volatility * np.sqrt(dt)) * z
-        
-        # Adjust log return cap
-        if log_return_cap is not None:
-            log_returns = np.clip(log_returns, -log_return_cap, log_return_cap)
-        
-        price_paths = current_price * np.exp(np.cumsum(log_returns, axis=1))
-        price_paths = np.hstack([np.full((simulations, 1), current_price), price_paths])
-        
-        final_prices = price_paths.T[-1]
-        return price_paths.T
+
+    z = t.rvs(df, size=(simulations, days)) if use_t_dist else np.random.normal(size=(simulations, days))
+    log_returns = (volatility * np.sqrt(dt)) * z
+    log_returns = np.clip(log_returns, -log_return_cap, log_return_cap) if log_return_cap else log_returns
+
+    price_paths = current_price * np.exp(np.cumsum(log_returns, axis=1))
+    price_paths = np.hstack([np.full((simulations, 1), current_price), price_paths])
+    return price_paths.T
+
+    
 def black_scholes_price(option_type, S, K, T, r, sigma):
     d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
     d2 = d1 - sigma * np.sqrt(T)
