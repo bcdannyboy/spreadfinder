@@ -18,7 +18,6 @@ SpreadFinder is a Python tool designed to identify and rank optimal options spre
 - Supports Student's t-distribution in Monte Carlo simulations for better tail risk modeling.
 - Outputs the top spreads to a CSV file.
 - Includes very basic visualization of the probabilities.
-- Volatility caching for faster processing.
 - Performs Bayesian Network analysis for better spread selection.
 
 ## Requirements

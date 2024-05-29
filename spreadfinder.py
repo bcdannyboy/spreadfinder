@@ -223,7 +223,7 @@ def get_stock_data(symbols, mindte, maxdte, api_token):
     
     return all_puts, all_calls
 
-def process_single_spread(i, j, put_chain, underlying_price, min_ror, max_strike_dist, simulations, volatility, risk_free_rate, api_token, symbol, exp, cache):
+def process_single_spread(i, j, put_chain, underlying_price, min_ror, max_strike_dist, simulations, volatility, risk_free_rate, api_token, symbol, exp, cache, min_prob_success):
     short_put = put_chain.iloc[j]
     long_put = put_chain.iloc[i]
 
@@ -277,6 +277,9 @@ def process_single_spread(i, j, put_chain, underlying_price, min_ror, max_strike
 
         # Bayesian Network Prediction
         bayesian_prob = bayesian_network_prediction(probability_of_success, mc_prob_profit_no_dte, mc_prob_profit_with_dte, mc_prob_profit_heston)
+
+        if bayesian_prob < min_prob_success:
+            return []
 
         return [(exp, short_put['strike'], long_put['strike'], credit, max_loss, return_on_risk, probability_of_success, mc_prob_profit_no_dte, mc_prob_profit_with_dte, mc_prob_profit_heston, bayesian_prob, pricing_state)]
     return []
@@ -334,11 +337,11 @@ def bayesian_network_prediction(prob_success, mc_prob_no_dte, mc_prob_with_dte, 
     # Return the continuous probability of success
     return query.values[1]
 
-def process_bull_put_spread(symbol, exp, put_chain, underlying_price, min_ror, max_strike_dist, simulations, volatility, risk_free_rate, api_token, cache):
+def process_bull_put_spread(symbol, exp, put_chain, underlying_price, min_ror, max_strike_dist, simulations, volatility, risk_free_rate, api_token, cache, min_prob_success):
     results = []
     put_chain = put_chain.sort_values(by='strike')
     with ProcessPoolExecutor(max_workers=os.cpu_count()) as executor:
-        futures = [executor.submit(process_single_spread, i, j, put_chain, underlying_price, min_ror, max_strike_dist, simulations, volatility, risk_free_rate, api_token, symbol, exp, cache) for i in range(len(put_chain)) for j in range(i + 1, len(put_chain))]
+        futures = [executor.submit(process_single_spread, i, j, put_chain, underlying_price, min_ror, max_strike_dist, simulations, volatility, risk_free_rate, api_token, symbol, exp, cache, min_prob_success) for i in range(len(put_chain)) for j in range(i + 1, len(put_chain))]
         total_spreads = len(futures)
         completed_spreads = 0
 
@@ -350,7 +353,7 @@ def process_bull_put_spread(symbol, exp, put_chain, underlying_price, min_ror, m
 
     return results
 
-def process_single_condor(i, j, k, l, put_chain, call_chain, underlying_price, min_ror, max_strike_dist, simulations, volatility, risk_free_rate, exp):
+def process_single_condor(i, j, k, l, put_chain, call_chain, underlying_price, min_ror, max_strike_dist, simulations, volatility, risk_free_rate, exp, min_prob_success):
     short_put = put_chain.iloc[j]
     long_put = put_chain.iloc[i]
     short_call = call_chain.iloc[k]
@@ -424,16 +427,19 @@ def process_single_condor(i, j, k, l, put_chain, call_chain, underlying_price, m
         # Bayesian Network Prediction
         bayesian_prob = bayesian_network_prediction(probability_of_success, mc_prob_profit_no_dte, mc_prob_profit_with_dte, mc_prob_profit_heston)
 
+        if bayesian_prob < min_prob_success:
+            return []
+
         return [(exp, short_put['strike'], long_put['strike'], short_call['strike'], long_call['strike'], credit, max_loss, return_on_risk, probability_of_success, mc_prob_profit_no_dte, mc_prob_profit_with_dte, mc_prob_profit_heston, bayesian_prob, pricing_state_put, pricing_state_call)]
     return []
 
-def process_iron_condor(symbol, exp, put_chain, call_chain, underlying_price, min_ror, max_strike_dist, simulations, volatility, risk_free_rate, api_token, cache):
+def process_iron_condor(symbol, exp, put_chain, call_chain, underlying_price, min_ror, max_strike_dist, simulations, volatility, risk_free_rate, api_token, cache, min_prob_success):
     results = []
     put_chain = put_chain.sort_values(by='strike')
     call_chain = call_chain.sort_values(by='strike')
 
     with ProcessPoolExecutor(max_workers=os.cpu_count()) as executor:
-        futures = [executor.submit(process_single_condor, i, j, k, l, put_chain, call_chain, underlying_price, min_ror, max_strike_dist, simulations, volatility, risk_free_rate, exp)
+        futures = [executor.submit(process_single_condor, i, j, k, l, put_chain, call_chain, underlying_price, min_ror, max_strike_dist, simulations, volatility, risk_free_rate, exp, min_prob_success)
                    for i in range(len(put_chain)) for j in range(i + 1, len(put_chain))
                    for k in range(len(call_chain)) for l in range(k + 1, len(call_chain))]
         total_condors = len(futures)
@@ -455,13 +461,13 @@ def batch_futures(iterator, batch_size):
             break
         yield batch
 
-def find_bull_put_spreads(puts, underlying_price, min_ror, max_strike_dist, batch_size, simulations, volatility, risk_free_rate, api_token, cache):
+def find_bull_put_spreads(puts, underlying_price, min_ror, max_strike_dist, batch_size, simulations, volatility, risk_free_rate, api_token, cache, min_prob_success):
     logger.info(f"Finding bull put spreads for underlying price {underlying_price} using batch size {batch_size}")
     bull_put_spreads = []
 
     with ProcessPoolExecutor(max_workers=os.cpu_count()) as executor:
         futures_iterator = (
-            executor.submit(process_bull_put_spread, symbol, exp, put_chain, underlying_price, min_ror, max_strike_dist, simulations, volatility, risk_free_rate, api_token, cache)
+            executor.submit(process_bull_put_spread, symbol, exp, put_chain, underlying_price, min_ror, max_strike_dist, simulations, volatility, risk_free_rate, api_token, cache, min_prob_success)
             for symbol, exp, put_chain in puts
         )
         batches_processed = 0
@@ -473,13 +479,13 @@ def find_bull_put_spreads(puts, underlying_price, min_ror, max_strike_dist, batc
 
     return bull_put_spreads
 
-def find_iron_condors(puts, calls, underlying_price, min_ror, max_strike_dist, batch_size, simulations, volatility, risk_free_rate, api_token, cache):
+def find_iron_condors(puts, calls, underlying_price, min_ror, max_strike_dist, batch_size, simulations, volatility, risk_free_rate, api_token, cache, min_prob_success):
     logger.info(f"Finding iron condors for underlying price {underlying_price} using batch size {batch_size}")
     iron_condors = []
 
     with ProcessPoolExecutor(max_workers=os.cpu_count()) as executor:
         futures_iterator = (
-            executor.submit(process_iron_condor, symbol, exp, put_chain, call_chain, underlying_price, min_ror, max_strike_dist, simulations, volatility, risk_free_rate, api_token, cache)
+            executor.submit(process_iron_condor, symbol, exp, put_chain, call_chain, underlying_price, min_ror, max_strike_dist, simulations, volatility, risk_free_rate, api_token, cache, min_prob_success)
             for (symbol, exp, put_chain), (symbol_c, exp_c, call_chain) in zip(puts, calls)
             if symbol == symbol_c and exp == exp_c
         )
@@ -492,7 +498,7 @@ def find_iron_condors(puts, calls, underlying_price, min_ror, max_strike_dist, b
 
     return iron_condors
 
-def find_best_spreads(symbols, puts, calls, top_n, min_ror, max_strike_dist, batch_size, simulations, risk_free_rate, api_token, find_ic):
+def find_best_spreads(symbols, puts, calls, top_n, min_ror, max_strike_dist, batch_size, simulations, risk_free_rate, api_token, find_ic, min_prob_success):
     combined_spreads = []
 
     with Manager() as manager:
@@ -505,12 +511,12 @@ def find_best_spreads(symbols, puts, calls, top_n, min_ror, max_strike_dist, bat
             symbol_puts = [put for put in puts if put[0] == symbol]
             symbol_calls = [call for call in calls if call[0] == symbol]
 
-            bull_put_spreads = find_bull_put_spreads(symbol_puts, underlying_price, min_ror, max_strike_dist, batch_size, simulations, volatility, risk_free_rate, api_token, cache)
+            bull_put_spreads = find_bull_put_spreads(symbol_puts, underlying_price, min_ror, max_strike_dist, batch_size, simulations, volatility, risk_free_rate, api_token, cache, min_prob_success)
             for spread in bull_put_spreads:
                 combined_spreads.append(list((*spread, 'bull_put', symbol)))  # Convert tuple to list and add symbol
 
             if find_ic:
-                iron_condors = find_iron_condors(symbol_puts, symbol_calls, underlying_price, min_ror, max_strike_dist, batch_size, simulations, volatility, risk_free_rate, api_token, cache)
+                iron_condors = find_iron_condors(symbol_puts, symbol_calls, underlying_price, min_ror, max_strike_dist, batch_size, simulations, volatility, risk_free_rate, api_token, cache, min_prob_success)
                 for spread in iron_condors:
                     combined_spreads.append(list((*spread, 'iron_condor', symbol)))  # Convert tuple to list and add symbol
 
@@ -535,32 +541,69 @@ def find_best_spreads(symbols, puts, calls, top_n, min_ror, max_strike_dist, bat
 
     return spread_data
 
-def plot_probabilities(spreads):
-    bull_puts = [spread for spread in spreads if spread[0] == 'bull_put']
-    iron_condors = [spread for spread in spreads if spread[0] == 'iron_condor']
+def backtest_portfolio(symbols, puts, calls, start_date, end_date, initial_cash, stop_loss_pct, max_positions, min_profit_pct, min_prob_success, min_ror, max_strike_dist, batch_size, simulations, risk_free_rate, api_token, find_ic, margin_multiplier):
+    initial_cash *= (1 + margin_multiplier)
+    cash = initial_cash
+    positions = []
+    equity_curve = []
+    dates = pd.date_range(start=start_date, end=end_date, freq='B')
     
-    fig, axes = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
+    for current_date in dates:
+        logger.info(f"Processing date: {current_date.strftime('%Y-%m-%d')}")
+        
+        # Check for expiring positions and close them
+        positions = [pos for pos in positions if datetime.datetime.strptime(pos['expiration'], '%Y-%m-%d') > current_date]
+        
+        # Evaluate current portfolio
+        current_equity = cash + sum(pos['credit'] for pos in positions)
+        equity_curve.append((current_date, current_equity))
+        
+        # Check for stop loss and minimum profit conditions
+        positions_to_remove = []
+        for pos in positions:
+            if pos['max_loss'] / initial_cash >= stop_loss_pct or pos['credit'] / pos['max_loss'] >= min_profit_pct:
+                cash += pos['credit']
+                positions_to_remove.append(pos)
+        
+        for pos in positions_to_remove:
+            positions.remove(pos)
+        
+        # Fetch new best spreads
+        best_spreads = find_best_spreads(symbols, puts, calls, max_positions - len(positions), min_ror, max_strike_dist, batch_size, simulations, risk_free_rate, api_token, find_ic, min_prob_success)
+        
+        # Allocate new positions
+        for spread in best_spreads:
+            if len(positions) < max_positions and cash >= spread[7]:
+                positions.append({
+                    'expiration': spread[2],
+                    'short_strike': spread[3],
+                    'long_strike': spread[4],
+                    'credit': spread[7],
+                    'max_loss': spread[8],
+                    'return_on_risk': spread[9],
+                    'probability_of_success': spread[10]
+                })
+                cash -= spread[7]
     
-    if bull_puts:
-        exp_dates, no_dte_probs, with_dte_probs, heston_probs, bayesian_probs = zip(*[(spread[2], spread[11], spread[12], spread[13], spread[14]) for spread in bull_puts])
-        axes[0].plot(exp_dates, no_dte_probs, label='No DTE Adjustment')
-        axes[0].plot(exp_dates, with_dte_probs, label='With DTE Adjustment')
-        axes[0].plot(exp_dates, heston_probs, label='Heston Model')
-        axes[0].plot(exp_dates, bayesian_probs, label='Bayesian Network')
-        axes[0].set_title('Bull Put Spreads')
-        axes[0].legend()
+    # Calculate final metrics
+    final_equity = cash + sum(pos['credit'] for pos in positions)
+    returns = (final_equity - initial_cash) / initial_cash
+    equity_curve_df = pd.DataFrame(equity_curve, columns=['Date', 'Equity'])
+    equity_curve_df.set_index('Date', inplace=True)
+    
+    # Calculate Sharpe ratio
+    daily_returns = equity_curve_df['Equity'].pct_change().dropna()
+    sharpe_ratio = np.sqrt(252) * daily_returns.mean() / daily_returns.std()
+    
+    return equity_curve_df, sharpe_ratio, returns
 
-    if iron_condors:
-        exp_dates, no_dte_probs, with_dte_probs, heston_probs, bayesian_probs = zip(*[(spread[2], spread[11], spread[12], spread[13], spread[14]) for spread in iron_condors])
-        axes[1].plot(exp_dates, no_dte_probs, label='No DTE Adjustment')
-        axes[1].plot(exp_dates, with_dte_probs, label='With DTE Adjustment')
-        axes[1].plot(exp_dates, heston_probs, label='Heston Model')
-        axes[1].plot(exp_dates, bayesian_probs, label='Bayesian Network')
-        axes[1].set_title('Iron Condors')
-        axes[1].legend()
-
-    plt.xlabel('Expiration Dates')
-    plt.ylabel('Probability of Profit')
+def plot_backtest_results(equity_curve_df, sharpe_ratio, returns):
+    plt.figure(figsize=(12, 8))
+    plt.plot(equity_curve_df.index, equity_curve_df['Equity'], label='Equity Curve')
+    plt.title(f'Backtest Results - Final Return: {returns:.2f}, Sharpe Ratio: {sharpe_ratio:.2f}')
+    plt.xlabel('Date')
+    plt.ylabel('Equity')
+    plt.legend()
     plt.show()
 
 if __name__ == '__main__':
@@ -580,28 +623,33 @@ if __name__ == '__main__':
     argparser.add_argument('-simulations', type=int, default=1000, help='Number of Monte Carlo simulations')
     argparser.add_argument('-risk_free_rate', '-rf', type=float, default=0.01, help='Risk-free interest rate')
     argparser.add_argument('--plot', action='store_true', help='Show probability of profit plot')
+    argparser.add_argument('-start_cash', '-c', type=float, required=True, help='Starting cash amount')
+    argparser.add_argument('-stop_loss_pct', '-sl', type=float, required=True, help='Stop loss percentage of starting cash')
+    argparser.add_argument('-max_positions', '-mp', type=int, required=True, help='Maximum number of positions at once')
+    argparser.add_argument('-min_profit_pct', '-mpf', type=float, required=True, help='Minimum profit percentage to close the position')
+    argparser.add_argument('-min_prob_success', '-ps', type=float, required=True, help='Minimum probability of success based on Bayesian probability')
+    argparser.add_argument('-years', '-y', type=int, required=True, help='Number of years to backtest')
+    argparser.add_argument('-margin', '-mg', type=float, required=True, help='Margin multiplier as a percentage of starting cash')
+
     args = argparser.parse_args()
 
     symbols = args.symbols.split(',')
+    start_date = datetime.datetime.now() - datetime.timedelta(days=365*args.years)
+    end_date = datetime.datetime.now()
+
     puts, calls = get_stock_data(symbols, args.mindte, args.maxdte, args.api_token)
 
     logger.info(f"Symbols: {symbols}")
 
-    best_spreads = find_best_spreads(symbols, puts, calls, args.top_n, args.min_ror, args.max_strike_dist, args.batch_size, args.simulations, args.risk_free_rate, args.api_token, args.include_iron_condors)
+    equity_curve_df, sharpe_ratio, returns = backtest_portfolio(
+        symbols, puts, calls, start_date, end_date, args.start_cash, args.stop_loss_pct, args.max_positions, args.min_profit_pct,
+        args.min_prob_success, args.min_ror, args.max_strike_dist, args.batch_size, args.simulations, args.risk_free_rate, args.api_token, args.include_iron_condors, args.margin
+    )
 
-    logger.info(f"Best Spreads for symbols {symbols} with min DTE {args.mindte} and max DTE {args.maxdte}")
-    df = pd.DataFrame(best_spreads, columns=['Symbol', 'Type', 'Expiration', 'Short Put Strike', 'Long Put Strike', 'Short Call Strike', 'Long Call Strike', 'Credit', 'Max Loss', 'Return on Risk', 'Chain Probability of Success', 'MC Probability of Profit (No DTE)', 'MC Probability of Profit (With DTE)', 'MC Probability of Profit (Heston)', 'Bayesian Probability', 'Pricing State (Put)', 'Pricing State (Call)', 'Average Probability'])
-    df.to_csv(args.output, index=False)
-    logger.info(f"Results saved to {args.output}")
-
-    for spread in best_spreads:
-        if spread[1] == 'bull_put':
-            logger.info(f"Bull Put Spread for {spread[0]}:\n\tExpiration: {spread[2]}\n\tShort Strike: {spread[3]}\n\tLong Strike: {spread[4]}\n\tCredit: {spread[7]}\n\tMax Loss: {spread[8]}\n\tReturn on Risk: {spread[9]*100:.2f}%\n\tChain Probability of Success: {spread[10]*100:.2f}%\n\tMC Probability of Profit (No DTE): {spread[11]*100:.2f}%\n\tMC Probability of Profit (With DTE): {spread[12]*100:.2f}%\n\tMC Probability of Profit (Heston): {spread[13]*100:.2f}%\n\tBayesian Probability: {spread[14]*100:.2f}%\n\tPricing State: {spread[15]}")
-        elif spread[1] == 'iron_condor':
-            logger.info(f"Iron Condor for {spread[0]}:\n\tExpiration: {spread[2]}\n\tShort Put Strike: {spread[3]}\n\tLong Put Strike: {spread[4]}\n\tShort Call Strike: {spread[5]}\n\tLong Call Strike: {spread[6]}\n\tCredit: {spread[7]}\n\tMax Loss: {spread[8]}\n\tReturn on Risk: {spread[9]*100:.2f}%\n\tChain Probability of Success: {spread[10]*100:.2f}%\n\tMC Probability of Profit (No DTE): {spread[11]*100:.2f}%\n\tMC Probability of Profit (With DTE): {spread[12]*100:.2f}%\n\tMC Probability of Profit (Heston): {spread[13]*100:.2f}%\n\tBayesian Probability: {spread[14]*100:.2f}%\n\tPricing State (Put): {spread[15]}\n\tPricing State (Call): {spread[16]}")
-
+    logger.info(f"Final Returns: {returns:.2f}, Sharpe Ratio: {sharpe_ratio:.2f}")
+    
     if args.plot:
-        plot_probabilities(best_spreads)
+        plot_backtest_results(equity_curve_df, sharpe_ratio, returns)
 
     endTime = datetime.datetime.now()
     logger.info(f"Time taken: {endTime - startTime}")
