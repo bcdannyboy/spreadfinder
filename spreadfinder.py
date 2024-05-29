@@ -112,6 +112,7 @@ def get_historical_volatility_adjusted(symbol, api_token, dte, cache, days=252):
     return adjusted_volatility
 
 def monte_carlo_simulation(current_price, days, simulations, volatility, use_t_dist=False, df=3, log_return_cap=None, use_heston=False, kappa=2.0, theta=0.02, xi=0.1, rho=-0.7):
+    from scipy.stats import t  # Add this import statement
     dt = 1 / 252  # daily time step
     simulations = 2**int(np.ceil(np.log2(simulations)))  # Ensure power of 2
 
@@ -140,7 +141,6 @@ def monte_carlo_simulation(current_price, days, simulations, volatility, use_t_d
     price_paths = np.hstack([np.full((simulations, 1), current_price), price_paths])
     return price_paths.T
 
-    
 def black_scholes_price(option_type, S, K, T, r, sigma):
     d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
     d2 = d1 - sigma * np.sqrt(T)
