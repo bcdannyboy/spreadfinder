@@ -18,6 +18,7 @@ SpreadFinder is a Python tool designed to identify and rank optimal options spre
 - Outputs the top spreads to a CSV file.
 - Includes very basic visualization of the probabilities.
 - Volatility caching for faster processing.
+- Performs Bayesian Network analysis for better spread selection.
 
 ## Requirements
 
@@ -92,6 +93,9 @@ The Student's t-distribution is used in Monte Carlo simulations to model the hea
 
 #### Heston Model
 The Heston model is a stochastic volatility model that assumes volatility is not constant but follows its own random process. It is widely used for pricing derivatives and capturing the empirical features of market data, such as volatility clustering and the leverage effect.
+
+#### Bayesian Network Analysis
+Bayesian Network analysis is used to model the relationships between different variables in the option spread selection process. It helps identify the most relevant factors that influence the success of a spread and provides a probabilistic framework for decision-making.
 
 ### Notes
 
