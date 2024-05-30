@@ -135,7 +135,7 @@ def monte_carlo_simulation(current_price, days, simulations, volatility, use_t_d
         Z2 = rho * Z1 + np.sqrt(1 - rho**2) * Z2
 
         for t in range(1, days + 1):
-            Vt = np.maximum(0, Vt + kappa (theta - Vt) * dt + xi * np.sqrt(Vt) * np.sqrt(dt) * Z1[t-1])
+            Vt = np.maximum(0, Vt + kappa * (theta - Vt) * dt + xi * np.sqrt(Vt) * np.sqrt(dt) * Z1[t-1])
             Vt = np.minimum(Vt, 4 * volatility**2)  # Bound volatility
             price_paths[t] = price_paths[t-1] * np.exp((Vt - 0.5 * Vt) * dt + np.sqrt(Vt * dt) * Z2[t-1])
 
@@ -667,7 +667,28 @@ if __name__ == '__main__':
 
         logger.info(f"Top {args.top_n} spreads:")
         for spread in best_spreads:
-            logger.info(spread)
+            if spread[1] == 'bull_put':
+                logger.info(
+                    f"Symbol: {spread[0]}, Type: {spread[1]}, Expiration: {spread[2]}\n"
+                    f"Short Put Strike: {spread[3]}, Long Put Strike: {spread[4]}\n"
+                    f"Credit: ${spread[7]:.2f}, Max Loss: ${spread[8]:.2f}, RoR: {spread[9] * 100:.2f}%\n"
+                    f"Probability of Success: {spread[10] * 100:.2f}%, MC Profit No DTE: {spread[11] * 100:.2f}%\n"
+                    f"MC Profit With DTE: {spread[12] * 100:.2f}%, MC Profit Heston: {spread[13] * 100:.2f}%\n"
+                    f"Bayesian Probability: {spread[14] * 100:.2f}%, Pricing State: {spread[15]}\n"
+                    f"Average Probability: {spread[-1] * 100:.2f}%\n"
+                )
+            elif spread[1] == 'iron_condor':
+                logger.info(
+                    f"Symbol: {spread[0]}, Type: {spread[1]}, Expiration: {spread[2]}\n"
+                    f"Short Put Strike: {spread[3]}, Long Put Strike: {spread[4]}\n"
+                    f"Short Call Strike: {spread[5]}, Long Call Strike: {spread[6]}\n"
+                    f"Credit: ${spread[7]:.2f}, Max Loss: ${spread[8]:.2f}, RoR: {spread[9] * 100:.2f}%\n"
+                    f"Probability of Success: {spread[10] * 100:.2f}%, MC Profit No DTE: {spread[11] * 100:.2f}%\n"
+                    f"MC Profit With DTE: {spread[12] * 100:.2f}%, MC Profit Heston: {spread[13] * 100:.2f}%\n"
+                    f"Bayesian Probability: {spread[14] * 100:.2f}%, Pricing State Put: {spread[15]}\n"
+                    f"Pricing State Call: {spread[16]}, Average Probability: {spread[-1] * 100:.2f}%\n"
+                )
+            print("---")
 
         pd.DataFrame(best_spreads, columns=[
             'Symbol', 'Spread Type', 'Expiration', 'Short Put Strike', 'Long Put Strike', 'Short Call Strike', 'Long Call Strike',
