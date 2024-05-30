@@ -135,7 +135,7 @@ def monte_carlo_simulation(current_price, days, simulations, volatility, use_t_d
         Z2 = rho * Z1 + np.sqrt(1 - rho**2) * Z2
 
         for t in range(1, days + 1):
-            Vt = np.maximum(0, Vt + kappa * (theta - Vt) * dt + xi * np.sqrt(Vt) * np.sqrt(dt) * Z1[t-1])
+            Vt = np.maximum(0, Vt + kappa (theta - Vt) * dt + xi * np.sqrt(Vt) * np.sqrt(dt) * Z1[t-1])
             Vt = np.minimum(Vt, 4 * volatility**2)  # Bound volatility
             price_paths[t] = price_paths[t-1] * np.exp((Vt - 0.5 * Vt) * dt + np.sqrt(Vt * dt) * Z2[t-1])
 
@@ -349,7 +349,7 @@ def process_bull_put_spread(symbol, exp, put_chain, underlying_price, min_ror, m
             results.extend(future.result())
             completed_spreads += 1
             if completed_spreads % 100 == 0 or completed_spreads == total_spreads:
-                logger.info(f"Processed {completed_spreads}/{total_spreads} bull put spreads")
+                logger.info(f"Processed {completed_spreads}/{total_spreads} bull put spreads for {symbol} with expiration {exp}")
 
     return results
 
@@ -494,7 +494,7 @@ def find_iron_condors(puts, calls, underlying_price, min_ror, max_strike_dist, b
             for future in as_completed(batch):
                 iron_condors.extend(future.result())
             batches_processed += 1
-            logger.info(f"Processed batch {batches_processed}")
+            logger.info(f"Processed batch {batches_processed} for iron condors for symbol {symbol} with expiration {exp}")
 
     return iron_condors
 
@@ -549,7 +549,7 @@ def backtest_portfolio(symbols, puts, calls, start_date, end_date, initial_cash,
     dates = pd.date_range(start=start_date, end=end_date, freq='B')
     
     for current_date in dates:
-        logger.info(f"Processing date: {current_date.strftime('%Y-%m-%d')}")
+        logger.info(f"Processing date: {current_date.strftime('%Y-%m-%d')} for backtesting portfolio including {len(positions)} positions")
         
         # Check for expiring positions and close them
         positions = [pos for pos in positions if datetime.datetime.strptime(pos['expiration'], '%Y-%m-%d') > current_date]
@@ -609,7 +609,8 @@ def plot_backtest_results(equity_curve_df, sharpe_ratio, returns):
 if __name__ == '__main__':
     startTime = datetime.datetime.now()
     argparser = argparse.ArgumentParser(description="Find and rank option spreads")
-    
+
+    # General arguments
     argparser.add_argument('-symbols', '-s', type=str, required=True, help='Comma-separated list of stock symbols to fetch data for')
     argparser.add_argument('-mindte', '-m', type=int, required=True, help='Minimum days to expiration')
     argparser.add_argument('-maxdte', '-l', type=int, required=True, help='Maximum days to expiration')
@@ -623,33 +624,56 @@ if __name__ == '__main__':
     argparser.add_argument('-simulations', type=int, default=1000, help='Number of Monte Carlo simulations')
     argparser.add_argument('-risk_free_rate', '-rf', type=float, default=0.01, help='Risk-free interest rate')
     argparser.add_argument('--plot', action='store_true', help='Show probability of profit plot')
-    argparser.add_argument('-start_cash', '-c', type=float, required=True, help='Starting cash amount')
-    argparser.add_argument('-stop_loss_pct', '-sl', type=float, required=True, help='Stop loss percentage of starting cash')
-    argparser.add_argument('-max_positions', '-mp', type=int, required=True, help='Maximum number of positions at once')
-    argparser.add_argument('-min_profit_pct', '-mpf', type=float, required=True, help='Minimum profit percentage to close the position')
-    argparser.add_argument('-min_prob_success', '-ps', type=float, required=True, help='Minimum probability of success based on Bayesian probability')
-    argparser.add_argument('-years', '-y', type=int, required=True, help='Number of years to backtest')
-    argparser.add_argument('-margin', '-mg', type=float, required=True, help='Margin multiplier as a percentage of starting cash')
+    argparser.add_argument('--backtesting', action='store_true', help='Enable backtesting')
+    argparser.add_argument('-min_prob_success', '-ps', type=float, default=0.5, help='Minimum probability of success based on Bayesian probability')
 
-    args = argparser.parse_args()
+    # Backtesting-specific arguments
+    backtesting_args = argparse.ArgumentParser(add_help=False)
+    backtesting_args.add_argument('-start_cash', '-c', type=float, required=True, help='Starting cash amount')
+    backtesting_args.add_argument('-stop_loss_pct', '-sl', type=float, required=True, help='Stop loss percentage of starting cash')
+    backtesting_args.add_argument('-max_positions', '-mp', type=int, required=True, help='Maximum number of positions at once')
+    backtesting_args.add_argument('-min_profit_pct', '-mpf', type=float, required=True, help='Minimum profit percentage to close the position')
+    backtesting_args.add_argument('-years', '-y', type=int, required=True, help='Number of years to backtest')
+    backtesting_args.add_argument('-margin', '-mg', type=float, required=True, help='Margin multiplier as a percentage of starting cash')
+
+    # Parse the known arguments first
+    args, unknown = argparser.parse_known_args()
+
+    if args.backtesting:
+        # Parse the backtesting-specific arguments if backtesting is enabled
+        argparser = argparse.ArgumentParser(parents=[argparser, backtesting_args])
+        args = argparser.parse_args()
 
     symbols = args.symbols.split(',')
-    start_date = datetime.datetime.now() - datetime.timedelta(days=365*args.years)
+    start_date = datetime.datetime.now() - datetime.timedelta(days=365 * args.years) if args.backtesting else None
     end_date = datetime.datetime.now()
 
     puts, calls = get_stock_data(symbols, args.mindte, args.maxdte, args.api_token)
 
     logger.info(f"Symbols: {symbols}")
 
-    equity_curve_df, sharpe_ratio, returns = backtest_portfolio(
-        symbols, puts, calls, start_date, end_date, args.start_cash, args.stop_loss_pct, args.max_positions, args.min_profit_pct,
-        args.min_prob_success, args.min_ror, args.max_strike_dist, args.batch_size, args.simulations, args.risk_free_rate, args.api_token, args.include_iron_condors, args.margin
-    )
+    if args.backtesting:
+        equity_curve_df, sharpe_ratio, returns = backtest_portfolio(
+            symbols, puts, calls, start_date, end_date, args.start_cash, args.stop_loss_pct, args.max_positions, args.min_profit_pct,
+            args.min_prob_success, args.min_ror, args.max_strike_dist, args.batch_size, args.simulations, args.risk_free_rate, args.api_token, args.include_iron_condors, args.margin
+        )
 
-    logger.info(f"Final Returns: {returns:.2f}, Sharpe Ratio: {sharpe_ratio:.2f}")
-    
-    if args.plot:
-        plot_backtest_results(equity_curve_df, sharpe_ratio, returns)
+        logger.info(f"Final Returns: {returns:.2f}, Sharpe Ratio: {sharpe_ratio:.2f}")
+
+        if args.plot:
+            plot_backtest_results(equity_curve_df, sharpe_ratio, returns)
+    else:
+        best_spreads = find_best_spreads(symbols, puts, calls, args.top_n, args.min_ror, args.max_strike_dist, args.batch_size, args.simulations, args.risk_free_rate, args.api_token, args.include_iron_condors, args.min_prob_success)
+
+        logger.info(f"Top {args.top_n} spreads:")
+        for spread in best_spreads:
+            logger.info(spread)
+
+        pd.DataFrame(best_spreads, columns=[
+            'Symbol', 'Spread Type', 'Expiration', 'Short Put Strike', 'Long Put Strike', 'Short Call Strike', 'Long Call Strike',
+            'Credit', 'Max Loss', 'Return on Risk', 'Probability of Success', 'MC Profit No DTE', 'MC Profit With DTE',
+            'MC Profit Heston', 'Bayesian Probability', 'Pricing State Put', 'Pricing State Call', 'Average Probability'
+        ]).to_csv(args.output, index=False)
 
     endTime = datetime.datetime.now()
     logger.info(f"Time taken: {endTime - startTime}")
