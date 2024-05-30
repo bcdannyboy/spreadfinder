@@ -24,7 +24,8 @@ SpreadFinder is a Python tool designed to identify and rank optimal options spre
 ## Requirements
 
 - Python 3.6+
-- [Tradier](https://tradier.com/) API key
+- [Tradier](https://tradier.com/) API key for Options Chains
+- [Financial Modeling Prep](https://site.financialmodelingprep.com/) API Key for Commodities
 - `argparse`
 - `datetime`
 - `requests`
@@ -35,6 +36,7 @@ SpreadFinder is a Python tool designed to identify and rank optimal options spre
 - `ratelimit`
 - `pgmpy`
 - `matplotlib`
+- `yfinance`
 
 ## Installation
 
@@ -59,7 +61,7 @@ pip install -r requirements.txt
 ## Usage
 
 ```sh
-python spreadfinder.py -symbols SYMBOL,SYMBOL -mindte MINDTE -maxdte MAXDTE [-top_n TOP_N] [-min_ror MIN_ROR] [-max_strike_dist MAX_STRIKE_DIST] [-output OUTPUT] [-batch_size BATCH_SIZE] -api_token API_TOKEN [--include_iron_condors] [-simulations SIMULATIONS] [-risk_free_rate RISK_FREE_RATE] [--plot] [--backtesting] [-start_cash START_CASH] [-stop_loss_pct STOP_LOSS_PCT] [-max_positions MAX_POSITIONS] [-min_profit_pct MIN_PROFIT_PCT] [-min_prob_success MIN_PROB_SUCCESS] [-years YEARS] [-margin MARGIN]
+python spreadfinder.py -symbols SYMBOL,SYMBOL -mindte MINDTE -maxdte MAXDTE [-top_n TOP_N] [-min_ror MIN_ROR] [-max_strike_dist MAX_STRIKE_DIST] [-output OUTPUT] [-batch_size BATCH_SIZE] -api_token API_TOKEN [--include_iron_condors] [-simulations SIMULATIONS] [-risk_free_rate RISK_FREE_RATE] [--plot] [--backtesting] [-min_prob_success MIN_PROB_SUCCESS] [-commodities_api_key COMMODITIES_API_KEY]
 ```
 
 ### Arguments
@@ -78,21 +80,16 @@ python spreadfinder.py -symbols SYMBOL,SYMBOL -mindte MINDTE -maxdte MAXDTE [-to
 - `-risk_free_rate`, `-rf`: Risk-free rate for option pricing (default: 0.01).
 - `--plot`: Plot the probabilities (default: False).
 - `--backtesting`: Enable backtesting (default: False).
-- `-start_cash`, `-c`: Starting cash amount for backtesting (required if backtesting is enabled).
-- `-stop_loss_pct`, `-sl`: Stop loss percentage of starting cash for backtesting (required if backtesting is enabled).
-- `-max_positions`, `-mp`: Maximum number of positions at once for backtesting (required if backtesting is enabled).
-- `-min_profit_pct`, `-mpf`: Minimum profit percentage to close the position for backtesting (required if backtesting is enabled).
-- `-min_prob_success`, `-ps`: Minimum probability of success based on Bayesian probability for backtesting (required if backtesting is enabled).
-- `-years`, `-y`: Number of years to backtest (required if backtesting is enabled).
-- `-margin`, `-mg`: Margin multiplier as a percentage of starting cash for backtesting (required if backtesting is enabled).
+- `-min_prob_success`, `-ps`: Minimum probability of success based on Bayesian probability (default: 0.5).
+- `-commodities_api_key`, `-c`: FinancialModelingPrep API key for commodity data (required).
 
 ### Example
 
 ```sh
-python spreadfinder.py -symbols GTLB -mindte 14 -maxdte 30 -top_n 10 -min_ror 0.15 -max_strike_dist 0.5 -batch_size 10000 -api_token "2FRbqCT74L2iJBpAFArYZTThhNxU" -simulations 1000 -risk_free_rate 0.0454 -start_cash 10000 -stop_loss_pct 0.1 -max_positions 5 -min_profit_pct 0.2 -min_prob_success 0.7 -years 1 -margin 1.0 --backtesting --plot
+python spreadfinder.py -symbols GTLB -mindte 14 -maxdte 30 -top_n 10 -min_ror 0.15 -max_strike_dist 0.5 -batch_size 10000 -api_token "2FRbqCT74L2iJBpAFArYZTThhNxU" -simulations 1000 -risk_free_rate 0.0454 -commodities_api_key CMy2CnXAdirIafquonQ0n9jKNZmKDruP --plot
 ```
 
-This command fetches option chains for GTLB with expirations between 14 and 30 days, calculates historical volatility using the GARCH model, finds the top 10 spreads with a minimum return on risk of 15% and a maximum strike distance of 50%, runs 1000 Monte Carlo simulations for each spread using Student's t-distribution, enables backtesting over 1 year with a starting cash of $10,000, a stop loss at 10% of starting cash, a maximum of 5 positions at once, a minimum profit percentage of 20%, a minimum probability of success of 70%, and a margin multiplier of 1.0, then plots the results.
+This command fetches option chains for GTLB with expirations between 14 and 30 days, calculates historical volatility using the GARCH model, finds the top 10 spreads with a minimum return on risk of 15% and a maximum strike distance of 50%, runs 1000 Monte Carlo simulations for each spread using Student's t-distribution, and plots the results.
 
 ### Additional Notes
 
