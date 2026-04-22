@@ -1,120 +1,135 @@
 # SpreadFinder
 
-SpreadFinder is a Python tool designed to identify and rank optimal options spreads based on various criteria such as probability of success, return on risk (ROR), and options pricing. The tool supports both bull put spreads and iron condor spreads for specified stock symbols within a given date range.
+SpreadFinder is a single-file Python utility for finding and ranking bull put credit spreads from live Tradier option-chain data. After setting a Tradier token, execution stays simple:
 
-## Features
+```sh
+export TRADIER_API_TOKEN="your_tradier_token"
+python spreadfinder.py --symbols AAPL --min-dte 14 --max-dte 45
+```
 
-- Fetches option chains for specified stock symbols within a given date range.
-- Identifies and ranks the following spreads:
-  - Bull Put
-  - Iron Condor
-- Utilizes Monte Carlo simulations to estimate probabilities of profit.
-  - Implements Latin Hypercube sampling for more efficient simulations.
-- Employs Black-Scholes option pricing.
-- Implements Binomial pricing for American options.
-- Uses GARCH model for estimating historical volatility.
-  - Estimates volatility with / without taking the searched options DTE into account.
-- Provides the Heston model for stochastic volatility simulations.
-- Supports Student's t-distribution in Monte Carlo simulations for better tail risk modeling.
-- Outputs the top spreads to a CSV file.
-- Includes very basic visualization of the probabilities.
-- Performs Bayesian Network analysis for better spread selection.
-- **New:** Optional backtesting feature to evaluate the performance of identified spreads over historical data.
+The tool scores candidate spreads with probability, return on risk, expected value, pricing edge, and simple liquidity signals, then writes the ranked results to a CSV file.
+
+## Current Features
+
+- Fetches Tradier option expirations and option chains.
+- Finds bull put credit spreads in a requested DTE range.
+- Estimates volatility with GARCH when `arch` is installed, with a realized-volatility fallback.
+- Runs Monte Carlo terminal-price simulations for profit and max-profit probabilities.
+- Adds practical spread fields such as DTE, width, breakeven, per-contract credit, max loss, annualized ROR, expected value, and bid/ask spread.
+- Supports optional Financial Modeling Prep commodity correlation scoring when enabled with a key.
+- Includes a no-network smoke test with `--self-test`.
+
+Iron condors, plotting, and backtesting are planned but not implemented. Their legacy flags now fail fast instead of crashing or silently doing nothing.
 
 ## Requirements
 
-- Python 3.6+
-- [Tradier](https://tradier.com/) API key for Options Chains
-- [Financial Modeling Prep](https://site.financialmodelingprep.com/) API Key for Commodities
-- `argparse`
-- `datetime`
-- `requests`
-- `numpy`
-- `pandas`
-- `scipy`
-- `arch`
-- `ratelimit`
-- `pgmpy`
-- `matplotlib`
-- `yfinance`
+- Python 3.10+.
+- A [Tradier](https://tradier.com/) API token for option chains and quote/history data.
+- Optional: a [Financial Modeling Prep](https://site.financialmodelingprep.com/) API key for commodity correlation scoring.
 
-## Installation
-
-Clone the repository:
+Install core dependencies:
 
 ```sh
-git clone https://github.com/bcdannyboy/spreadfinder.git
+python -m pip install -r requirements.txt
 ```
 
-Change to the project directory:
+Optional quality/features:
 
 ```sh
-cd spreadfinder
+python -m pip install scipy arch yfinance
 ```
 
-Install the required Python packages:
+`scipy` improves Monte Carlo sampling, `arch` enables GARCH volatility estimates, and `yfinance` is required only when commodity scoring is enabled.
+
+## Quick Start
+
+First verify the script and installed core dependencies without any network calls:
 
 ```sh
-pip install -r requirements.txt
+python spreadfinder.py --self-test
+```
+
+Set your Tradier token as an environment variable so it does not appear in shell history.
+
+macOS/Linux:
+
+```sh
+export TRADIER_API_TOKEN="your_tradier_token"
+python spreadfinder.py --symbols AAPL --min-dte 14 --max-dte 45
+```
+
+PowerShell:
+
+```powershell
+$env:TRADIER_API_TOKEN = "your_tradier_token"
+python spreadfinder.py --symbols AAPL --min-dte 14 --max-dte 45
+```
+
+Optional commodity scoring:
+
+```sh
+export FMP_API_KEY="your_fmp_key"
+python spreadfinder.py --symbols AAPL --min-dte 14 --max-dte 45 --use-commodity-score
 ```
 
 ## Usage
 
 ```sh
-python spreadfinder.py -symbols SYMBOL,SYMBOL -mindte MINDTE -maxdte MAXDTE [-top_n TOP_N] [-min_ror MIN_ROR] [-max_strike_dist MAX_STRIKE_DIST] [-output OUTPUT] [-batch_size BATCH_SIZE] -api_token API_TOKEN [--include_iron_condors] [-simulations SIMULATIONS] [-risk_free_rate RISK_FREE_RATE] [--plot] [--backtesting] [-min_prob_success MIN_PROB_SUCCESS] [-commodities_api_key COMMODITIES_API_KEY]
+python spreadfinder.py --symbols SYMBOL[,SYMBOL...] --min-dte DAYS --max-dte DAYS [options]
 ```
 
-### Arguments
+Common options:
 
-- `-symbols`, `-s`: Comma-separated list of stock symbols to fetch data for (required).
-- `-mindte`, `-m`: Minimum days to expiration (required).
-- `-maxdte`, `-l`: Maximum days to expiration (required).
-- `-top_n`, `-n`: Number of top spreads to display (default: 10).
-- `-min_ror`, `-r`: Minimum return on risk (default: 0.15).
-- `-max_strike_dist`, `-d`: Maximum strike distance percentage (default: 0.2).
-- `-output`, `-o`: Output CSV file path (default: best_spreads.csv).
-- `-batch_size`, `-b`: Batch size for processing tasks (default: 10).
-- `-api_token`: Tradier API token (required).
-- `--include_iron_condors`: Include iron condor spreads (default: False).
-- `-simulations`, `-sim`: Number of Monte Carlo simulations to run (default: 1000).
-- `-risk_free_rate`, `-rf`: Risk-free rate for option pricing (default: 0.01).
-- `--plot`: Plot the probabilities (default: False).
-- `--backtesting`: Enable backtesting (default: False).
-- `-min_prob_success`, `-ps`: Minimum probability of success based on Bayesian probability (default: 0.5).
-- `-commodities_api_key`, `-c`: FinancialModelingPrep API key for commodity data (required).
+- `--symbols`, `-s`: comma-separated stock symbols. Symbols are stripped, uppercased, and deduplicated.
+- `--min-dte`, `-m`: minimum days to expiration.
+- `--max-dte`, `-l`: maximum days to expiration.
+- `--top`, `-n`: number of top ranked spreads to display and write.
+- `--min-ror`, `-r`: minimum return on risk as a decimal. `0.15` means 15%.
+- `--max-strike-dist`, `-d`: maximum short-strike distance from spot as a decimal. `0.2` means 20%.
+- `--min-prob-success`, `-ps`: minimum composite probability as a decimal.
+- `--simulations`: Monte Carlo simulations per expiration.
+- `--risk-free-rate`, `-rf`: risk-free rate as a decimal. `0.01` means 1%.
+- `--output`, `-o`: output CSV path. Default: `best_spreads.csv`.
+- `--batch-size`, `-b`: maximum concurrent option-chain requests, capped by local CPU and internal worker limits.
+- `--api-token`: Tradier token. Prefer `TRADIER_API_TOKEN`.
+- `--commodities-api-key`, `-c`: FMP key. Prefer `FMP_API_KEY`.
+- `--use-commodity-score`: include optional FMP commodity correlation in the composite score.
+- `--max-commodities`: maximum FMP commodity symbols sampled when commodity scoring is enabled.
+- `--self-test`: run the built-in smoke test and exit.
 
-### Example
+Legacy aliases such as `-symbols`, `-mindte`, `-maxdte`, `-top_n`, `-api_token`, and `-commodities_api_key` are still accepted for compatibility.
 
-```sh
-python spreadfinder.py -symbols GTLB -mindte 14 -maxdte 30 -top_n 10 -min_ror 0.15 -max_strike_dist 0.5 -batch_size 10000 -api_token "2FRbqCT74L2iJBpAFArYZTThhNxU" -simulations 1000 -risk_free_rate 0.0454 -commodities_api_key CMy2CnXAdirIafquonQ0n9jKNZmKDruP --plot
-```
+## Output
 
-This command fetches option chains for GTLB with expirations between 14 and 30 days, calculates historical volatility using the GARCH model, finds the top 10 spreads with a minimum return on risk of 15% and a maximum strike distance of 50%, runs 1000 Monte Carlo simulations for each spread using Student's t-distribution, and plots the results.
+SpreadFinder always writes a CSV, even when no spread matches. Key output columns include:
 
-### Additional Notes
+- legs/context: symbol, spread type, expiration, DTE, underlying price, volatility used, short put, long put, short-put distance from spot.
+- risk: width, breakeven, credit, max profit, max loss, per-contract values.
+- ranking: return on risk, annualized ROR, probability fields, expected value, composite score.
+- quality: pricing state, bid/ask spreads, minimum volume, minimum open interest.
 
-#### GARCH Model
-The Generalized Autoregressive Conditional Heteroskedasticity (GARCH) model is used for estimating the volatility of financial returns. It models the variance of the current error term as a function of the variances of previous time periods, providing a more accurate estimate of volatility over time.
+Credit and max loss are shown per share and per standard 100-share contract.
 
-#### Student's t-Distribution
-The Student's t-distribution is used in Monte Carlo simulations to model the heavier tails observed in financial return distributions, capturing extreme events more effectively than the normal distribution.
+## Assumptions
 
-#### Heston Model
-The Heston model is a stochastic volatility model that assumes volatility is not constant but follows its own random process. It is widely used for pricing derivatives and capturing the empirical features of market data, such as volatility clustering and the leverage effect.
+- The tool uses live provider data and needs network access for real scans.
+- Tradier option rows must include usable bid, ask, strike, and `greeks.mid_iv` values.
+- Commodity scoring is optional and experimental. Enable it explicitly with `--use-commodity-score`; without it, the model uses a neutral commodity score.
+- Commodity scoring uses FMP commodity history plus Yahoo Finance stock history through `yfinance`.
+- Results are candidates for research, not trade recommendations.
 
-#### Bayesian Network Analysis
-Bayesian Network analysis is used to model the relationships between different variables in the option spread selection process. It helps identify the most relevant factors that influence the success of a spread and provides a probabilistic framework for decision-making.
+## Troubleshooting
 
-### Notes
+- `python spreadfinder.py --help` should work without API keys.
+- Missing dependency: run `python -m pip install -r requirements.txt`.
+- Missing optional dependency: install the optional package shown in the error message, or omit the feature that requires it.
+- Bad or missing token: set `TRADIER_API_TOKEN` or pass `--api-token`. Authentication/provider failures exit nonzero instead of writing a misleading empty scan.
+- No spreads found: widen DTE, lower `--min-ror`, lower `--min-prob-success`, or increase `--max-strike-dist`.
+- Rate limits or provider errors: retry later or reduce concurrent chain requests with `--batch-size`.
 
-- Iron Condors take **super** long right now.
-- Ensure you have a valid Tradier API token to fetch real-time options data.
-- Tradier API requests are rate-limited to 60/minute.
-- When calculating volatility, the Monte Carlo simulation uses the GARCH model both with and without taking into account the DTE of the options you're searching for.
-- When selling options, you typically want to identify spreads that are fairly priced or overpriced to maximize your return on risk.
+## Planned
 
-### TODO
-
-- [ ] Better visualizations
-- [ ] More spreads
-- [ ] Better Backtesting
+- Iron condor search.
+- Plotting.
+- Backtesting.
+- Additional spread strategies.
