@@ -19,12 +19,12 @@ The tool scores candidate spreads with probability, return on risk, expected val
 - Supports optional Financial Modeling Prep commodity correlation scoring when enabled with a key.
 - Includes a no-network smoke test with `--self-test`.
 
-Iron condors, plotting, and backtesting are planned but not implemented. Their legacy flags now fail fast instead of crashing or silently doing nothing.
+Iron condors, plotting, and backtesting are reserved but not implemented. Their legacy flags fail fast instead of crashing or silently doing nothing.
 
 ## Requirements
 
 - Python 3.10+.
-- A [Tradier](https://tradier.com/) API token for option chains and quote/history data.
+- A [Tradier](https://tradier.com/) API token for option chains and quote/history data. The script targets Tradier's production API at `https://api.tradier.com/v1`.
 - Optional: a [Financial Modeling Prep](https://site.financialmodelingprep.com/) API key for commodity correlation scoring.
 
 Install core dependencies:
@@ -72,6 +72,8 @@ export FMP_API_KEY="your_fmp_key"
 python spreadfinder.py --symbols AAPL --min-dte 14 --max-dte 45 --use-commodity-score
 ```
 
+Commodity scoring fetches a Financial Modeling Prep commodity list/history and Yahoo Finance stock history, capped by `--max-commodities`. It is opt-in because it is slower, uses more network calls, and needs optional `yfinance`.
+
 ## Usage
 
 ```sh
@@ -96,8 +98,19 @@ Common options:
 - `--use-commodity-score`: include optional FMP commodity correlation in the composite score.
 - `--max-commodities`: maximum FMP commodity symbols sampled when commodity scoring is enabled.
 - `--self-test`: run the built-in smoke test and exit.
+- `--quiet`: suppress progress logs.
+- `--debug`: show tracebacks for troubleshooting.
+- `--version`: print the SpreadFinder version.
 
 Legacy aliases such as `-symbols`, `-mindte`, `-maxdte`, `-top_n`, `-api_token`, and `-commodities_api_key` are still accepted for compatibility.
+
+Examples:
+
+```sh
+python spreadfinder.py --symbols AAPL,MSFT --min-dte 21 --max-dte 60 --output tech_spreads.csv
+python spreadfinder.py --symbols SPY --min-dte 14 --max-dte 45 --min-ror 0.20 --min-prob-success 0.60
+python spreadfinder.py --symbols AAPL --min-dte 14 --max-dte 45 --quiet
+```
 
 ## Output
 
@@ -109,6 +122,8 @@ SpreadFinder always writes a CSV, even when no spread matches. Key output column
 - quality: pricing state, bid/ask spreads, minimum volume, minimum open interest.
 
 Credit and max loss are shown per share and per standard 100-share contract.
+
+The default output path is `best_spreads.csv`. Existing output files are overwritten atomically, and the output parent directory must already exist. Call-side CSV columns are reserved for not-yet-implemented strategies and are blank for bull-put scans.
 
 ## Assumptions
 
@@ -124,10 +139,10 @@ Credit and max loss are shown per share and per standard 100-share contract.
 - Missing dependency: run `python -m pip install -r requirements.txt`.
 - Missing optional dependency: install the optional package shown in the error message, or omit the feature that requires it.
 - Bad or missing token: set `TRADIER_API_TOKEN` or pass `--api-token`. Authentication/provider failures exit nonzero instead of writing a misleading empty scan.
-- No spreads found: widen DTE, lower `--min-ror`, lower `--min-prob-success`, or increase `--max-strike-dist`.
+- No spreads found: widen DTE, lower `--min-ror`, lower `--min-prob-success`, or increase `--max-strike-dist`. Empty results can also come from illiquid chains or provider rows without usable bid/ask/strike/positive `greeks.mid_iv`; rerun with `--debug` for more detail.
 - Rate limits or provider errors: retry later or reduce concurrent chain requests with `--batch-size`.
 
-## Planned
+## Reserved Not Implemented
 
 - Iron condor search.
 - Plotting.
