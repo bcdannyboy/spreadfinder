@@ -2,6 +2,8 @@
 """Find and rank bull put credit spreads from live option chains.
 
 Quick start:
+  python -m pip install -r requirements.txt
+  python spreadfinder.py --self-test
   export TRADIER_API_TOKEN="..."
   python spreadfinder.py --symbols AAPL --min-dte 14 --max-dte 45
 
@@ -28,7 +30,7 @@ from threading import Lock
 from typing import Any
 
 
-VERSION = "0.2.0"
+VERSION = "0.2.1"
 
 TRADIER_API_URL = "https://api.tradier.com/v1"
 FMP_API_URL = "https://financialmodelingprep.com/api/v3"
@@ -47,6 +49,7 @@ MAX_VOLATILITY = 2.0
 NEUTRAL_COMMODITY_PROBABILITY = 0.50
 DEFAULT_MAX_COMMODITIES = 25
 MAX_WORKERS = min(8, os.cpu_count() or 1)
+MAX_SIMULATION_CELLS = 5_000_000
 
 CSV_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
 
@@ -259,7 +262,7 @@ def get_json(
             if attempt < REQUEST_RETRIES:
                 time.sleep(retry_delay_seconds(response, attempt))
                 continue
-            raise RuntimeError(f"{context} failed ({exc.__class__.__name__})") from exc
+            raise RuntimeError(f"{context} failed ({exc.__class__.__name__})") from None
 
         if response.status_code in TRANSIENT_HTTP_STATUSES and attempt < REQUEST_RETRIES:
             time.sleep(retry_delay_seconds(response, attempt))
@@ -269,7 +272,7 @@ def get_json(
             response.raise_for_status()
         except requests.HTTPError as exc:
             reason = response.reason or "HTTP error"
-            raise RuntimeError(f"{context} failed with HTTP {response.status_code}: {reason}") from exc
+            raise RuntimeError(f"{context} failed with HTTP {response.status_code}: {reason}") from None
 
         try:
             payload = response.json()
@@ -293,15 +296,19 @@ def get_stock_price(symbol: str, api_token: str) -> float:
         context=f"Tradier quote fetch for {symbol}",
         expected_type=dict,
     )
-    quote = data.get("quotes", {}).get("quote")
+    quotes = data.get("quotes")
+    if not isinstance(quotes, dict):
+        raise RuntimeError(f"Tradier quote response for {symbol} did not include quotes")
+    quote = quotes.get("quote")
     if isinstance(quote, list):
         quote = quote[0] if quote else None
     if not isinstance(quote, dict):
         raise RuntimeError(f"Tradier quote response for {symbol} did not include a quote")
-    price = safe_float(quote.get("last") or quote.get("mark") or quote.get("close"))
-    if price is None or price <= 0:
-        raise RuntimeError(f"Tradier quote response for {symbol} did not include a usable price")
-    return price
+    for field in ("last", "mark", "close"):
+        price = safe_float(quote.get(field))
+        if price is not None and price > 0:
+            return price
+    raise RuntimeError(f"Tradier quote response for {symbol} did not include a usable price")
 
 
 def get_option_expirations(symbol: str, api_token: str) -> list[str]:
@@ -313,11 +320,14 @@ def get_option_expirations(symbol: str, api_token: str) -> list[str]:
         context=f"Tradier expiration fetch for {symbol}",
         expected_type=dict,
     )
-    expirations = data.get("expirations", {}).get("date")
+    expirations_data = data.get("expirations")
+    if not isinstance(expirations_data, dict):
+        raise RuntimeError(f"Tradier expiration response for {symbol} did not include expirations")
+    expirations = expirations_data.get("date")
     return [str(exp) for exp in as_list(expirations)]
 
 
-def get_option_chain(symbol: str, expiration: str, api_token: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+def get_option_chain(symbol: str, expiration: str, api_token: str) -> list[dict[str, Any]]:
     TRADIER_LIMITER.wait()
     data = get_json(
         f"{TRADIER_API_URL}/markets/options/chains",
@@ -326,12 +336,14 @@ def get_option_chain(symbol: str, expiration: str, api_token: str) -> tuple[list
         context=f"Tradier option-chain fetch for {symbol} {expiration}",
         expected_type=dict,
     )
-    option_rows = as_list(data.get("options", {}).get("option"))
+    options = data.get("options")
+    if not isinstance(options, dict):
+        raise RuntimeError(f"Tradier option-chain response for {symbol} {expiration} did not include options")
+    option_rows = as_list(options.get("option"))
     puts = [row for row in option_rows if isinstance(row, dict) and row.get("option_type") == "put"]
-    calls = [row for row in option_rows if isinstance(row, dict) and row.get("option_type") == "call"]
-    if not puts and not calls:
-        logger.warning("No option data found for %s %s", symbol, expiration)
-    return puts, calls
+    if not puts:
+        logger.warning("No put option data found for %s %s", symbol, expiration)
+    return puts
 
 
 def get_historical_volatility(symbol: str, api_token: str, cache: dict[str, float], days: int = TRADING_DAYS) -> float:
@@ -408,11 +420,6 @@ def simple_annualized_volatility(closes: list[float], days: int = TRADING_DAYS) 
     return clamp(annualized, 0.01, MAX_VOLATILITY)
 
 
-def get_historical_volatility_adjusted(symbol: str, api_token: str, dte: int, cache: dict[str, float], days: int = TRADING_DAYS) -> float:
-    # The simulator already scales annualized volatility by the option horizon.
-    return get_historical_volatility(symbol, api_token, cache, days)
-
-
 def fetch_commodity_data(api_key: str, symbol: str) -> dict[str, Any] | None:
     try:
         return get_json(
@@ -428,7 +435,11 @@ def fetch_commodity_data(api_key: str, symbol: str) -> dict[str, Any] | None:
 
 def fetch_stock_data(ticker: str, period: str = "5y") -> Any:
     pd = require_module("pandas")
-    yf = require_module("yfinance")
+    try:
+        yf = importlib.import_module("yfinance")
+    except ImportError:
+        logger.warning("Optional dependency 'yfinance' is not installed; commodity score will be neutral.")
+        return pd.DataFrame()
     try:
         stock = yf.Ticker(ticker)
         hist = stock.history(period=period)
@@ -469,7 +480,8 @@ def calculate_correlations(stock_data: Any, commodities_data: dict[str, dict[str
         return {}
 
     stock_close = stock_data[["Date", "Close"]].copy()
-    stock_close["Date"] = pd.to_datetime(stock_close["Date"])
+    stock_close["Date"] = pd.to_datetime(stock_close["Date"], errors="coerce")
+    stock_close.dropna(subset=["Date", "Close"], inplace=True)
     stock_close.set_index("Date", inplace=True)
     stock_close["Close"] = pd.to_numeric(stock_close["Close"], errors="coerce")
 
@@ -481,7 +493,8 @@ def calculate_correlations(stock_data: Any, commodities_data: dict[str, dict[str
         df = pd.DataFrame(historical)
         if "date" not in df.columns or "close" not in df.columns:
             continue
-        df["date"] = pd.to_datetime(df["date"])
+        df["date"] = pd.to_datetime(df["date"], errors="coerce")
+        df.dropna(subset=["date", "close"], inplace=True)
         df.set_index("date", inplace=True)
         df["close"] = pd.to_numeric(df["close"], errors="coerce")
         combined = stock_close.join(df[["close"]], how="inner")
@@ -499,8 +512,8 @@ def commodity_probability(correlations: dict[str, float] | float | None) -> floa
     if correlations is None:
         return NEUTRAL_COMMODITY_PROBABILITY
     if isinstance(correlations, (int, float)):
-        corr = safe_float(correlations)
-        return NEUTRAL_COMMODITY_PROBABILITY if corr is None else clamp((corr + 1.0) / 2.0)
+        probability = safe_float(correlations)
+        return NEUTRAL_COMMODITY_PROBABILITY if probability is None else clamp(probability)
 
     values = [safe_float(value) for value in correlations.values()]
     normalized = [clamp((value + 1.0) / 2.0) for value in values if value is not None]
@@ -538,8 +551,12 @@ def calculate_commodity_probability(symbol: str, api_key: str | None, max_commod
 
     if not commodities_data:
         return NEUTRAL_COMMODITY_PROBABILITY
-    stock_data = fetch_stock_data(symbol)
-    return commodity_probability(calculate_correlations(stock_data, commodities_data))
+    try:
+        stock_data = fetch_stock_data(symbol)
+        return commodity_probability(calculate_correlations(stock_data, commodities_data))
+    except Exception as exc:
+        logger.warning("Commodity correlation failed for %s (%s); commodity score will be neutral", symbol, exc)
+        return NEUTRAL_COMMODITY_PROBABILITY
 
 
 def black_scholes_price(option_type: str, S: float, K: float, T: float, r: float, sigma: float) -> float:
@@ -568,25 +585,23 @@ def american_option_binomial(S: float, K: float, T: float, r: float, sigma: floa
         return max(0.0, S - K) if option_type == "call" else max(0.0, K - S)
     p = clamp((math.exp(r * dt_step) - d) / denom)
 
-    asset_prices = np.zeros((steps + 1, steps + 1))
-    option_values = np.zeros((steps + 1, steps + 1))
-    for i in range(steps + 1):
-        for j in range(i + 1):
-            asset_prices[j, i] = S * (u ** (i - j)) * (d**j)
-
+    terminal_nodes = np.arange(steps + 1)
+    asset_prices = S * (u ** (steps - terminal_nodes)) * (d**terminal_nodes)
     if option_type == "call":
-        option_values[:, steps] = np.maximum(0, asset_prices[:, steps] - K)
+        option_values = np.maximum(0, asset_prices - K)
     elif option_type == "put":
-        option_values[:, steps] = np.maximum(0, K - asset_prices[:, steps])
+        option_values = np.maximum(0, K - asset_prices)
     else:
         raise ValueError(f"Unsupported option_type: {option_type}")
 
+    discount = math.exp(-r * dt_step)
     for i in range(steps - 1, -1, -1):
-        for j in range(i + 1):
-            hold = math.exp(-r * dt_step) * (p * option_values[j, i + 1] + (1.0 - p) * option_values[j + 1, i + 1])
-            exercise = max(0.0, asset_prices[j, i] - K) if option_type == "call" else max(0.0, K - asset_prices[j, i])
-            option_values[j, i] = max(hold, exercise)
-    return float(option_values[0, 0])
+        option_values = discount * (p * option_values[:-1] + (1.0 - p) * option_values[1:])
+        nodes = np.arange(i + 1)
+        asset_prices = S * (u ** (i - nodes)) * (d**nodes)
+        exercise = np.maximum(0, asset_prices - K) if option_type == "call" else np.maximum(0, K - asset_prices)
+        option_values = np.maximum(option_values, exercise)
+    return float(option_values[0])
 
 
 def probability_above_threshold(S: float, threshold: float, T: float, r: float, sigma: float) -> float:
@@ -613,22 +628,28 @@ def monte_carlo_terminal_prices(
     rho: float = -0.7,
 ) -> Any:
     np = require_module("numpy")
-    days = max(1, int(days))
-    simulations = max(2, int(simulations))
-    simulations = 2 ** int(math.ceil(math.log2(simulations)))
-    dt_step = 1.0 / TRADING_DAYS
+    steps = max(1, int(days))
+    simulations = max(1, int(simulations))
+    if steps * simulations > MAX_SIMULATION_CELLS:
+        raise RuntimeError(
+            f"Monte Carlo request is too large ({steps * simulations:,} cells); "
+            f"reduce --simulations or --max-dte"
+        )
+    dt_step = (steps / CALENDAR_DAYS) / steps
 
     try:
         stats = require_module("scipy.stats", "scipy")
         qmc = require_module("scipy.stats.qmc", "scipy")
-        sampler = qmc.LatinHypercube(d=days, seed=seed)
+        sampler = qmc.LatinHypercube(d=steps, seed=seed)
         samples = sampler.random(n=simulations)
         shocks = stats.t.ppf(samples, df) if use_t_dist else stats.norm.ppf(samples)
     except RuntimeError:
         rng = np.random.default_rng(seed)
-        shocks = rng.standard_t(df, size=(simulations, days)) if use_t_dist else rng.standard_normal((simulations, days))
+        shocks = rng.standard_t(df, size=(simulations, steps)) if use_t_dist else rng.standard_normal((simulations, steps))
 
     shocks = np.nan_to_num(shocks, nan=0.0, posinf=5.0, neginf=-5.0)
+    if use_t_dist and df > 2:
+        shocks = shocks / math.sqrt(df / (df - 2))
     volatility = max(0.0001, min(float(volatility), MAX_VOLATILITY))
 
     if use_heston:
@@ -636,9 +657,9 @@ def monte_carlo_terminal_prices(
         variance = np.full(simulations, volatility**2)
         prices = np.full(simulations, current_price, dtype=float)
         z1 = shocks.T
-        z2 = rng.standard_normal(size=(days, simulations))
+        z2 = rng.standard_normal(size=(steps, simulations))
         z2 = rho * z1 + math.sqrt(max(0.0, 1.0 - rho**2)) * z2
-        for day in range(days):
+        for day in range(steps):
             variance = np.maximum(
                 0.0,
                 variance + kappa * (theta - variance) * dt_step + xi * np.sqrt(variance) * math.sqrt(dt_step) * z1[day],
@@ -651,16 +672,15 @@ def monte_carlo_terminal_prices(
     return current_price * np.exp(np.sum(log_returns, axis=1))
 
 
-def get_stock_data(
+def fetch_option_chains(
     symbols: list[str],
     mindte: int,
     maxdte: int,
     api_token: str,
     batch_size: int = 10,
-) -> tuple[list[tuple[str, str, Any]], list[tuple[str, str, Any]], list[str]]:
+) -> tuple[list[tuple[str, str, Any]], list[str]]:
     pd = require_module("pandas")
     all_puts: list[tuple[str, str, Any]] = []
-    all_calls: list[tuple[str, str, Any]] = []
     errors: list[str] = []
     today = dt.date.today()
 
@@ -697,20 +717,17 @@ def get_stock_data(
             for future in as_completed(futures):
                 expiration = futures[future]
                 try:
-                    puts, calls = future.result()
+                    puts = future.result()
                 except RuntimeError as exc:
                     logger.warning("%s", exc)
                     errors.append(str(exc))
                     continue
                 if puts:
                     all_puts.append((symbol, expiration, pd.DataFrame(puts)))
-                if calls:
-                    all_calls.append((symbol, expiration, pd.DataFrame(calls)))
 
         symbol_put_count = sum(1 for item in all_puts if item[0] == symbol)
-        symbol_call_count = sum(1 for item in all_calls if item[0] == symbol)
-        logger.info("Found %s put chains and %s call chains for %s", symbol_put_count, symbol_call_count, symbol)
-    return all_puts, all_calls, errors
+        logger.info("Found %s put chains for %s", symbol_put_count, symbol)
+    return all_puts, errors
 
 
 def extract_mid_iv(greeks: Any) -> float | None:
@@ -979,17 +996,12 @@ def find_bull_put_spreads(
     underlying_price: float,
     min_ror: float,
     max_strike_dist: float,
-    batch_size: int,
     simulations: int,
     volatility: float,
     risk_free_rate: float,
-    api_token: str,
-    cache: dict[str, float],
     min_prob_success: float,
-    commodity_corr: dict[str, float] | float | None,
+    commodity_prob: float,
 ) -> list[SpreadResult]:
-    del batch_size, api_token, cache
-    commodity_prob = commodity_probability(commodity_corr)
     spreads: list[SpreadResult] = []
     for symbol, expiration, put_chain in puts:
         spreads.extend(
@@ -1008,53 +1020,6 @@ def find_bull_put_spreads(
             )
         )
     return spreads
-
-
-def find_best_spreads(
-    symbols: list[str],
-    puts: list[tuple[str, str, Any]],
-    calls: list[tuple[str, str, Any]],
-    top_n: int,
-    min_ror: float,
-    max_strike_dist: float,
-    batch_size: int,
-    simulations: int,
-    risk_free_rate: float,
-    api_token: str,
-    find_ic: bool,
-    min_prob_success: float,
-    commodity_corr: dict[str, float] | float | None,
-) -> list[SpreadResult]:
-    del calls
-    if find_ic:
-        raise RuntimeError("Iron condor search is not implemented in this one-file utility yet.")
-
-    cache: dict[str, float] = {}
-    combined: list[SpreadResult] = []
-    for symbol in symbols:
-        logger.info("Fetching quote and volatility for %s", symbol)
-        underlying_price = get_stock_price(symbol, api_token)
-        volatility = get_historical_volatility(symbol, api_token, cache)
-        symbol_puts = [put for put in puts if put[0] == symbol]
-        combined.extend(
-            find_bull_put_spreads(
-                symbol_puts,
-                underlying_price,
-                min_ror,
-                max_strike_dist,
-                batch_size,
-                simulations,
-                volatility,
-                risk_free_rate,
-                api_token,
-                cache,
-                min_prob_success,
-                commodity_corr,
-            )
-        )
-
-    combined.sort(key=lambda spread: spread.composite_score, reverse=True)
-    return combined[:top_n]
 
 
 def spread_to_row(spread: SpreadResult) -> dict[str, Any]:
@@ -1131,11 +1096,15 @@ def render_results(spreads: list[SpreadResult], output: Path, top_n: int) -> Non
     for spread in spreads:
         print(
             f"{spread.symbol} {spread.expiration} {spread.spread_type}: "
-            f"sell {spread.short_put_strike:g}P / buy {spread.long_put_strike:g}P, "
+            f"DTE {spread.dte}, sell {spread.short_put_strike:g}P / buy {spread.long_put_strike:g}P, "
             f"credit {spread.credit:.2f} per share (${spread.credit_per_contract:.0f}/contract), "
+            f"breakeven {spread.breakeven:.2f}, "
             f"max loss ${spread.max_loss_per_contract:.0f}/contract, "
             f"ROR {spread.return_on_risk * 100:.1f}%, "
             f"profit probability {spread.mc_profit_probability * 100:.1f}%, "
+            f"composite probability {spread.composite_probability * 100:.1f}%, "
+            f"EV {spread.expected_value:.2f}, "
+            f"liq min vol/OI {spread.min_volume:.0f}/{spread.min_open_interest:.0f}, "
             f"score {spread.composite_score:.3f}"
         )
     print(f"Wrote CSV to {output}.")
@@ -1144,9 +1113,9 @@ def render_results(spreads: list[SpreadResult], output: Path, top_n: int) -> Non
 def run_scan(config: ScanConfig) -> list[SpreadResult]:
     start_time = dt.datetime.now()
     logger.info("Fetching option chains for %s", ", ".join(config.symbols))
-    puts, calls, fetch_errors = get_stock_data(config.symbols, config.mindte, config.maxdte, config.api_token, config.batch_size)
-    if fetch_errors and not puts and not calls:
-        raise RuntimeError("No usable option chains fetched; last provider error: " + fetch_errors[-1])
+    puts, scan_errors = fetch_option_chains(config.symbols, config.mindte, config.maxdte, config.api_token, config.batch_size)
+    if scan_errors and not puts:
+        raise RuntimeError("No usable option chains fetched; last provider error: " + scan_errors[-1])
 
     commodity_scores: dict[str, float] = {}
     if config.use_commodity_score:
@@ -1157,28 +1126,38 @@ def run_scan(config: ScanConfig) -> list[SpreadResult]:
         commodity_scores = {symbol: NEUTRAL_COMMODITY_PROBABILITY for symbol in config.symbols}
 
     all_spreads: list[SpreadResult] = []
+    processed_symbols = 0
+    cache: dict[str, float] = {}
     for symbol in config.symbols:
         symbol_puts = [put for put in puts if put[0] == symbol]
         if not symbol_puts:
             logger.warning("No put chains available for %s after expiration filtering", symbol)
             continue
-        symbol_calls = [call for call in calls if call[0] == symbol]
-        spreads = find_best_spreads(
-            [symbol],
-            symbol_puts,
-            symbol_calls,
-            config.top_n,
-            config.min_ror,
-            config.max_strike_dist,
-            config.batch_size,
-            config.simulations,
-            config.risk_free_rate,
-            config.api_token,
-            False,
-            config.min_prob_success,
-            commodity_scores.get(symbol, NEUTRAL_COMMODITY_PROBABILITY),
-        )
+        try:
+            logger.info("Fetching quote and volatility for %s", symbol)
+            underlying_price = get_stock_price(symbol, config.api_token)
+            volatility = get_historical_volatility(symbol, config.api_token, cache)
+            processed_symbols += 1
+            spreads = find_bull_put_spreads(
+                symbol_puts,
+                underlying_price,
+                config.min_ror,
+                config.max_strike_dist,
+                config.simulations,
+                volatility,
+                config.risk_free_rate,
+                config.min_prob_success,
+                commodity_scores.get(symbol, NEUTRAL_COMMODITY_PROBABILITY),
+            )
+        except RuntimeError as exc:
+            message = f"{symbol}: {exc}"
+            logger.warning("Skipping %s", message)
+            scan_errors.append(message)
+            continue
         all_spreads.extend(spreads)
+
+    if scan_errors and not all_spreads and processed_symbols == 0:
+        raise RuntimeError("No usable symbols scored; last error: " + scan_errors[-1])
 
     all_spreads.sort(key=lambda spread: spread.composite_score, reverse=True)
     best_spreads = all_spreads[: config.top_n]
@@ -1194,27 +1173,28 @@ def build_arg_parser() -> argparse.ArgumentParser:
         formatter_class=SpreadFinderHelpFormatter,
         epilog=(
             "Examples:\n"
-            "  TRADIER_API_TOKEN=... python spreadfinder.py --symbols AAPL --min-dte 14 --max-dte 45\n"
-            "  python spreadfinder.py -s AAPL,MSFT -m 21 -l 60 --min-ror 0.20 --output spreads.csv\n"
-            "  python spreadfinder.py --self-test"
+            "  python spreadfinder.py --self-test\n"
+            "  python spreadfinder.py --symbols AAPL --min-dte 14 --max-dte 45\n"
+            "  python spreadfinder.py --symbols AAPL,MSFT --min-dte 21 --max-dte 60 --min-ror 0.20 --output spreads.csv\n"
+            "Set TRADIER_API_TOKEN in your environment, or pass --api-token for ad hoc scans."
         ),
     )
-    parser.add_argument("-symbols", "-s", "--symbols", dest="symbols", help="Comma-separated symbols, for example AAPL,MSFT")
-    parser.add_argument("-mindte", "-m", "--min-dte", dest="mindte", type=int, help="Minimum days to expiration")
-    parser.add_argument("-maxdte", "-l", "--max-dte", dest="maxdte", type=int, help="Maximum days to expiration")
-    parser.add_argument("-top_n", "-n", "--top", "--top-n", dest="top_n", type=int, default=10, help="Number of top spreads to display")
-    parser.add_argument("-min_ror", "-r", "--min-ror", dest="min_ror", type=float, default=0.15, help="Minimum return on risk as a decimal; 0.15 means 15%%")
-    parser.add_argument("-max_strike_dist", "-d", "--max-strike-dist", dest="max_strike_dist", type=float, default=0.2, help="Max short-strike distance from spot as a decimal; 0.2 means 20%%")
-    parser.add_argument("-output", "-o", "--output", dest="output", default="best_spreads.csv", help="Output CSV file path")
-    parser.add_argument("-batch_size", "-b", "--batch-size", dest="batch_size", type=int, default=10, help="Max concurrent option-chain requests")
-    parser.add_argument("--include_iron_condors", "--include-iron-condors", action="store_true", help="Reserved; currently fails fast because iron condors are not implemented")
-    parser.add_argument("-api_token", "--api-token", dest="api_token", help="Tradier API token. Prefer TRADIER_API_TOKEN.")
-    parser.add_argument("-simulations", "-sim", "--simulations", dest="simulations", type=int, default=1000, help="Monte Carlo simulations per expiration")
-    parser.add_argument("-risk_free_rate", "-rf", "--risk-free-rate", dest="risk_free_rate", type=float, default=0.01, help="Risk-free rate as a decimal; 0.01 means 1%%")
+    parser.add_argument("--symbols", "-s", "-symbols", dest="symbols", help="Comma-separated symbols, for example AAPL,MSFT")
+    parser.add_argument("--min-dte", "-m", "-mindte", dest="mindte", type=int, help="Minimum days to expiration")
+    parser.add_argument("--max-dte", "-l", "-maxdte", dest="maxdte", type=int, help="Maximum days to expiration")
+    parser.add_argument("--top", "--top-n", "-n", "-top_n", dest="top_n", type=int, default=10, help="Number of top spreads to display")
+    parser.add_argument("--min-ror", "-r", "-min_ror", dest="min_ror", type=float, default=0.15, help="Minimum return on risk as a decimal; 0.15 means 15%%")
+    parser.add_argument("--max-strike-dist", "-d", "-max_strike_dist", dest="max_strike_dist", type=float, default=0.2, help="Max short-strike distance from spot as a decimal; 0.2 means 20%%")
+    parser.add_argument("--output", "-o", "-output", dest="output", default="best_spreads.csv", help="Output CSV file path")
+    parser.add_argument("--batch-size", "-b", "-batch_size", dest="batch_size", type=int, default=10, help="Max concurrent option-chain requests")
+    parser.add_argument("--include-iron-condors", "--include_iron_condors", action="store_true", help="Reserved; currently fails fast because iron condors are not implemented")
+    parser.add_argument("--api-token", "-api_token", dest="api_token", help="Tradier API token. Prefer TRADIER_API_TOKEN.")
+    parser.add_argument("--simulations", "-sim", "-simulations", dest="simulations", type=int, default=1000, help="Monte Carlo simulations per expiration")
+    parser.add_argument("--risk-free-rate", "-rf", "-risk_free_rate", dest="risk_free_rate", type=float, default=0.01, help="Risk-free rate as a decimal; 0.01 means 1%%")
     parser.add_argument("--plot", action="store_true", help="Reserved; currently fails fast because plotting is not implemented")
     parser.add_argument("--backtesting", action="store_true", help="Reserved; currently fails fast because backtesting is not implemented")
-    parser.add_argument("-min_prob_success", "-ps", "--min-prob-success", dest="min_prob_success", type=float, default=0.5, help="Minimum composite probability as a decimal")
-    parser.add_argument("-commodities_api_key", "-c", "--commodities-api-key", dest="commodities_api_key", help="FinancialModelingPrep API key. Prefer FMP_API_KEY.")
+    parser.add_argument("--min-prob-success", "-ps", "-min_prob_success", dest="min_prob_success", type=float, default=0.5, help="Minimum composite probability as a decimal")
+    parser.add_argument("--commodities-api-key", "-c", "-commodities_api_key", dest="commodities_api_key", help="FinancialModelingPrep API key. Prefer FMP_API_KEY.")
     parser.add_argument("--use-commodity-score", action="store_true", help="Fetch FMP commodity data and include it in the composite score")
     parser.add_argument("--max-commodities", type=int, default=DEFAULT_MAX_COMMODITIES, help="Max FMP commodities sampled when commodity scoring is enabled")
     parser.add_argument("--self-test", action="store_true", help="Run a no-network smoke test and exit")
@@ -1256,6 +1236,15 @@ def validate_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> 
         parser.error("--batch-size must be greater than 0")
     if args.simulations <= 0:
         parser.error("--simulations must be greater than 0")
+    for attr, flag in (
+        ("min_ror", "--min-ror"),
+        ("max_strike_dist", "--max-strike-dist"),
+        ("risk_free_rate", "--risk-free-rate"),
+        ("min_prob_success", "--min-prob-success"),
+    ):
+        value = getattr(args, attr)
+        if not math.isfinite(value):
+            parser.error(f"{flag} must be finite")
     if args.min_ror < 0:
         parser.error("--min-ror cannot be negative")
     if not 0 <= args.max_strike_dist <= 1:
@@ -1264,13 +1253,6 @@ def validate_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> 
         parser.error("--min-prob-success must be between 0 and 1")
     if args.max_commodities <= 0:
         parser.error("--max-commodities must be greater than 0")
-
-    output = Path(args.output).expanduser()
-    if output.exists() and output.is_dir():
-        parser.error("--output must be a file path, not a directory")
-    if not output.parent.exists():
-        parser.error(f"--output parent directory does not exist: {output.parent}")
-    args.output = output
 
     if args.self_test:
         return
@@ -1281,6 +1263,18 @@ def validate_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> 
         parser.error("--min-dte is required unless --self-test is used")
     if args.maxdte is None:
         parser.error("--max-dte is required unless --self-test is used")
+    if args.simulations * args.maxdte > MAX_SIMULATION_CELLS:
+        parser.error(
+            f"--simulations times --max-dte must be at most {MAX_SIMULATION_CELLS:,} "
+            "to avoid excessive local memory use"
+        )
+
+    output = Path(args.output).expanduser()
+    if output.exists() and output.is_dir():
+        parser.error("--output must be a file path, not a directory")
+    if not output.parent.exists():
+        parser.error(f"--output parent directory does not exist: {output.parent}")
+    args.output = output
 
     args.api_token = args.api_token or os.getenv("TRADIER_API_TOKEN")
     if not args.api_token:
@@ -1312,12 +1306,24 @@ def config_from_args(args: argparse.Namespace) -> ScanConfig:
 
 
 def run_self_test() -> int:
-    assert normalize_symbols(" aapl, MSFT,,aapl ") == ["AAPL", "MSFT"]
-    assert sanitize_csv_cell("=BAD") == "'=BAD"
+    import contextlib
+    import io
+
+    def check(condition: bool, message: str) -> None:
+        if not condition:
+            raise RuntimeError(f"self-test failed: {message}")
+
+    check(normalize_symbols(" aapl, MSFT,,aapl ") == ["AAPL", "MSFT"], "symbol normalization")
+    check(sanitize_csv_cell("=BAD") == "'=BAD", "CSV formula sanitization")
+    check(commodity_probability(0.5) == NEUTRAL_COMMODITY_PROBABILITY, "neutral commodity probability stays neutral")
+    check(
+        len(monte_carlo_terminal_prices(100.0, 30, 123, 0.25, seed=11)) == 123,
+        "Monte Carlo honors requested simulation count",
+    )
     bs_price = black_scholes_price("put", 100.0, 95.0, 30 / CALENDAR_DAYS, 0.01, 0.25)
-    assert math.isfinite(bs_price) and bs_price > 0
+    check(math.isfinite(bs_price) and bs_price > 0, "Black-Scholes put price")
     binomial_price = american_option_binomial(100.0, 95.0, 30 / CALENDAR_DAYS, 0.01, 0.25, option_type="put")
-    assert math.isfinite(binomial_price) and binomial_price > 0
+    check(math.isfinite(binomial_price) and binomial_price > 0, "binomial put price")
 
     pd = require_module("pandas")
     expiration = (dt.date.today() + dt.timedelta(days=30)).strftime(DATE_FORMAT)
@@ -1328,30 +1334,113 @@ def run_self_test() -> int:
             {"option_type": "put", "strike": 100, "bid": 2.20, "ask": 2.40, "greeks": {"mid_iv": 0.26}, "volume": 200, "open_interest": 1000},
         ]
     )
-    spreads = process_bull_put_spread(
-        "TEST",
-        expiration,
-        chain,
-        underlying_price=105.0,
-        min_ror=0.05,
-        max_strike_dist=0.25,
-        simulations=64,
-        volatility=0.25,
-        risk_free_rate=0.01,
-        min_prob_success=0.0,
-        commodity_prob=NEUTRAL_COMMODITY_PROBABILITY,
-        seed=7,
+    noisy_chain = pd.DataFrame(
+        [
+            {"strike": "90", "bid": "0.10", "ask": "0.20", "greeks": {"mid_iv": "0.28"}, "volume": None, "open_interest": 5},
+            {"strike": "90", "bid": "0.12", "ask": "0.22", "greeks": {"mid_iv": "0.27"}, "volume": 7, "open_interest": None},
+            {"strike": "95", "bid": "bad", "ask": "0.80", "greeks": {"mid_iv": "0.27"}},
+            {"strike": "100", "bid": "2.00", "ask": "1.90", "greeks": {"mid_iv": "0.26"}},
+            {"strike": "105", "bid": "2.50", "ask": "2.75", "greeks": {}},
+        ]
     )
-    assert spreads, "self-test expected at least one spread"
-    assert all(0 <= spread.composite_probability <= 1 for spread in spreads)
-    assert all(spread.max_loss > 0 and spread.credit > 0 for spread in spreads)
+    prepared = prepare_put_chain(noisy_chain)
+    check(len(prepared) == 1 and float(prepared.iloc[0]["strike"]) == 90.0, "provider row filtering and dedupe")
+
+    quote_payloads = [
+        {"quotes": {"quote": {"last": "0", "mark": "101.25", "close": "100.50"}}},
+        {"quotes": None},
+    ]
+    original_get_json = globals()["get_json"]
+    try:
+        globals()["get_json"] = lambda *args, **kwargs: quote_payloads.pop(0)
+        check(get_stock_price("TEST", "token") == 101.25, "quote fallback uses first positive price")
+        try:
+            get_stock_price("BROKEN", "token")
+        except RuntimeError as exc:
+            check("quote" in str(exc).lower(), "malformed quote response has clear error")
+        else:
+            check(False, "malformed quote response should fail")
+    finally:
+        globals()["get_json"] = original_get_json
+
+    previous_logger_disabled = logger.disabled
+    logger.disabled = True
+    try:
+        spreads = process_bull_put_spread(
+            "TEST",
+            expiration,
+            chain,
+            underlying_price=105.0,
+            min_ror=0.05,
+            max_strike_dist=0.25,
+            simulations=64,
+            volatility=0.25,
+            risk_free_rate=0.01,
+            min_prob_success=0.0,
+            commodity_prob=NEUTRAL_COMMODITY_PROBABILITY,
+            seed=7,
+        )
+    finally:
+        logger.disabled = previous_logger_disabled
+    check(bool(spreads), "expected at least one spread")
+    check(all(0 <= spread.composite_probability <= 1 for spread in spreads), "bounded composite probabilities")
+    check(all(spread.max_loss > 0 and spread.credit > 0 for spread in spreads), "positive spread risk/reward")
 
     with tempfile.TemporaryDirectory() as temp_dir:
         output = Path(temp_dir) / "self_test.csv"
         write_results_csv(spreads[:1], output)
         text = output.read_text(encoding="utf-8")
-        assert "Symbol,Spread Type,Expiration" in text
-        assert "TEST,bull_put" in text
+        check("Symbol,Spread Type,Expiration" in text, "CSV header")
+        check("TEST,bull_put" in text, "CSV row")
+
+        original_fetch_option_chains = globals()["fetch_option_chains"]
+        original_get_stock_price = globals()["get_stock_price"]
+        original_get_historical_volatility = globals()["get_historical_volatility"]
+        try:
+            globals()["fetch_option_chains"] = lambda symbols, mindte, maxdte, api_token, batch_size: (
+                [("GOOD", expiration, chain), ("BAD", expiration, chain)],
+                [],
+            )
+
+            def fake_price(symbol: str, api_token: str) -> float:
+                if symbol == "BAD":
+                    raise RuntimeError("fake quote failure")
+                return 105.0
+
+            globals()["get_stock_price"] = fake_price
+            globals()["get_historical_volatility"] = lambda symbol, api_token, cache: 0.25
+            scan_output = Path(temp_dir) / "scan.csv"
+            previous_logger_disabled = logger.disabled
+            logger.disabled = True
+            try:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    scan_results = run_scan(
+                        ScanConfig(
+                            symbols=["GOOD", "BAD"],
+                            mindte=1,
+                            maxdte=60,
+                            top_n=5,
+                            min_ror=0.05,
+                            max_strike_dist=0.25,
+                            output=scan_output,
+                            batch_size=2,
+                            simulations=64,
+                            risk_free_rate=0.01,
+                            min_prob_success=0.0,
+                            api_token="token",
+                            commodities_api_key=None,
+                            use_commodity_score=False,
+                            max_commodities=1,
+                        )
+                    )
+            finally:
+                logger.disabled = previous_logger_disabled
+            check(scan_results and all(spread.symbol == "GOOD" for spread in scan_results), "partial scan keeps good symbol")
+            check("GOOD,bull_put" in scan_output.read_text(encoding="utf-8"), "partial scan writes CSV")
+        finally:
+            globals()["fetch_option_chains"] = original_fetch_option_chains
+            globals()["get_stock_price"] = original_get_stock_price
+            globals()["get_historical_volatility"] = original_get_historical_volatility
 
     print("Self-test passed.")
     return 0
